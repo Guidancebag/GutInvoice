@@ -469,11 +469,16 @@ def generate_pdf(invoice_data):
     t = invoice_data.get("invoice_type", "TAX INVOICE")
     tid = env("CARBONE_BOS_ID") if "BILL" in t else (env("CARBONE_TAX_ID") if "TAX" in t else env("CARBONE_NONGST_ID"))
     r = requests.post(
-        f"https://api.carbone.io/render/{tid}",
-        headers={"Authorization": f"Bearer {env('CARBONE_API_KEY')}", "Content-Type": "application/json"},
+        f"https://api.carbone.io/render/{tid}?download=true",
+        headers={
+            "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
+            "Content-Type": "application/json",
+            "carbone-version": "5"
+        },
         json={"data": invoice_data, "convertTo": "pdf"},
         timeout=60
     )
+```    )
     if r.status_code != 200:
         raise Exception(f"Carbone error {r.status_code}: {r.text}")
     rid = r.json().get("data", {}).get("renderId")
