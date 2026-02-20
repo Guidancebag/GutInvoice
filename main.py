@@ -2,9 +2,8 @@
 ╔═══════════════════════════════════════════════════════════╗
 ║        GutInvoice — Every Invoice has a Voice [v2]        ║
 ║     India's First Voice-First GST Invoice in Telugu       ║
-║                                                           ║
-║  Voice Note → Sarvam AI → Claude AI → Carbone PDF        ║
-║              Delivered via WhatsApp in 30 seconds         ║
+║                                                           ║        ║
+║              Delivered via WhatsApp in 60 seconds         ║
 ╚═══════════════════════════════════════════════════════════╝
 
 FIX v2: Lazy client initialization — clients created per request
