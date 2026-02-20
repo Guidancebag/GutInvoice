@@ -1,7 +1,11 @@
 """
 GutInvoice — Every Invoice has a Voice
-India's First Voice-First WhatsApp Invoice Generator for Telugu MSMEs
-v5 — All fixes: saaras:v2.5, carbone-version:5, ?download=true, JSON extraction fix
+v6 — All fixes applied:
+  ✅ saaras:v2.5 (Sarvam model)
+  ✅ carbone-version: 5 (header)
+  ✅ ?download=true (URL param)
+  ✅ versioning=true (URL param for numeric template ID)
+  ✅ Robust JSON extraction
 """
 
 import os
@@ -41,16 +45,16 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .logo-sub{font-size:11px;color:#475569;margin-top:3px;letter-spacing:1px;text-transform:uppercase}
 .live-pill{display:flex;align-items:center;gap:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);padding:8px 18px;border-radius:50px;font-size:12px;color:var(--green);font-weight:700;letter-spacing:0.5px}
 .live-dot{width:7px;height:7px;background:var(--green);border-radius:50%;animation:blink 2s infinite}
-@keyframes blink{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(16,185,129,0.5)}50%{opacity:0.4;box-shadow:0 0 0 5px transparent}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
 .hero{min-height:90vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:80px 40px;position:relative}
 .hero::before{content:'';position:absolute;width:900px;height:900px;background:radial-gradient(circle,rgba(255,107,53,0.07) 0%,transparent 65%);top:-300px;left:50%;transform:translateX(-50%);pointer-events:none}
-.hero-chip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,107,53,0.07);border:1px solid rgba(255,107,53,0.25);color:var(--orange);padding:8px 22px;border-radius:50px;font-size:13px;font-weight:700;margin-bottom:36px;letter-spacing:0.3px;position:relative;z-index:1}
+.hero-chip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,107,53,0.07);border:1px solid rgba(255,107,53,0.25);color:var(--orange);padding:8px 22px;border-radius:50px;font-size:13px;font-weight:700;margin-bottom:36px;position:relative;z-index:1}
 .hero h1{font-size:clamp(42px,7vw,82px);font-weight:900;line-height:1.05;letter-spacing:-2.5px;margin-bottom:24px;position:relative;z-index:1}
 .hero h1 em{color:var(--orange);font-style:normal}
 .hero-desc{font-size:clamp(16px,2.2vw,20px);color:#64748B;max-width:580px;line-height:1.7;margin-bottom:16px;position:relative;z-index:1}
-.hero-telugu{font-size:16px;color:#475569;font-style:italic;margin-bottom:52px;position:relative;z-index:1}
-.hero-telugu span{color:#FBBF24}
-.flow-visual{display:flex;align-items:center;justify-content:center;gap:0;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:20px;padding:28px 40px;margin-bottom:52px;flex-wrap:wrap;position:relative;z-index:1;max-width:820px}
+.hero-te{font-size:16px;color:#475569;font-style:italic;margin-bottom:52px;position:relative;z-index:1}
+.hero-te span{color:#FBBF24}
+.flow-visual{display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:20px;padding:28px 40px;margin-bottom:52px;flex-wrap:wrap;position:relative;z-index:1;max-width:820px}
 .fv-step{display:flex;flex-direction:column;align-items:center;gap:10px;padding:0 18px}
 .fv-icon{width:54px;height:54px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px}
 .fv1{background:rgba(255,107,53,0.1);border:1px solid rgba(255,107,53,0.2)}
@@ -61,10 +65,10 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .fv-arrow{font-size:20px;color:rgba(255,107,53,0.3);padding:0 4px;margin-top:-20px}
 .btn-group{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;position:relative;z-index:1}
 .btn-primary{background:var(--orange);color:#fff;padding:15px 36px;border-radius:50px;font-size:15px;font-weight:800;text-decoration:none;box-shadow:0 0 30px rgba(255,107,53,0.25);transition:all 0.2s}
-.btn-primary:hover{background:#e85d25;transform:translateY(-2px);box-shadow:0 0 45px rgba(255,107,53,0.4)}
+.btn-primary:hover{background:#e85d25;transform:translateY(-2px)}
 .btn-secondary{background:transparent;color:#64748B;padding:15px 36px;border-radius:50px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid rgba(255,255,255,0.08);transition:all 0.2s}
 .btn-secondary:hover{border-color:rgba(255,107,53,0.3);color:var(--orange)}
-.stats-bar{display:flex;justify-content:center;gap:0;border-top:1px solid rgba(255,255,255,0.04);border-bottom:1px solid rgba(255,255,255,0.04);flex-wrap:wrap}
+.stats-bar{display:flex;justify-content:center;border-top:1px solid rgba(255,255,255,0.04);border-bottom:1px solid rgba(255,255,255,0.04);flex-wrap:wrap}
 .stat-item{padding:44px 60px;text-align:center;border-right:1px solid rgba(255,255,255,0.04);flex:1;min-width:160px}
 .stat-item:last-child{border-right:none}
 .stat-n{font-size:44px;font-weight:900;color:var(--orange);letter-spacing:-2px;line-height:1}
@@ -145,12 +149,11 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
   <div><div class="logo">Gut<span>Invoice</span></div><div class="logo-sub">Every Invoice has a Voice</div></div>
   <div class="live-pill"><span class="live-dot"></span>LIVE</div>
 </nav>
-
 <section class="hero">
   <div class="hero-chip">🇮🇳 Made for Telugu-speaking Business Owners</div>
   <h1>Your Voice.<br/>Your <em>Invoice.</em></h1>
   <p class="hero-desc">Send a WhatsApp voice note in Telugu or English — get a professional GST invoice PDF delivered back in under 30 seconds. No app. No typing. No hassle.</p>
-  <p class="hero-telugu">మాట్లాడండి — <span>Invoice వస్తుంది.</span> అంతే.</p>
+  <p class="hero-te">మాట్లాడండి — <span>Invoice వస్తుంది.</span> అంతే.</p>
   <div class="flow-visual">
     <div class="fv-step"><div class="fv-icon fv1">🎙️</div><div class="fv-label">You Speak</div></div>
     <div class="fv-arrow">→</div>
@@ -165,14 +168,12 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <a href="#pricing" class="btn-secondary">See Pricing →</a>
   </div>
 </section>
-
 <div class="stats-bar">
   <div class="stat-item"><div class="stat-n">30s</div><div class="stat-l">Invoice Delivery</div></div>
   <div class="stat-item"><div class="stat-n">3</div><div class="stat-l">Invoice Types</div></div>
   <div class="stat-item"><div class="stat-n">0</div><div class="stat-l">Apps to Download</div></div>
   <div class="stat-item"><div class="stat-n">₹199</div><div class="stat-l">Per Month</div></div>
 </div>
-
 <section class="section" id="promise">
   <div class="center-col">
     <div class="s-label">What You Get</div>
@@ -188,7 +189,6 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <div class="promise-card"><div class="p-icon">✅</div><div class="p-title">Always GST Compliant</div><p class="p-desc">All 3 invoice types supported — <span class="p-hl">Tax Invoice, Bill of Supply, plain Invoice</span> — auto-selected for your business.</p></div>
   </div>
 </section>
-
 <section class="section section-alt" id="how">
   <div class="center-col">
     <div class="s-label">How It Works</div>
@@ -202,7 +202,6 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <div class="how-card"><div class="how-num">Step 04</div><div class="how-icon">💬</div><div class="how-title">PDF on WhatsApp</div><p class="how-desc">Your professional GST invoice PDF arrives on WhatsApp in under 30 seconds. Forward it directly to your customer.</p></div>
   </div>
 </section>
-
 <section class="section" id="demo">
   <div class="center-col">
     <div class="s-label">Live Example</div>
@@ -217,17 +216,16 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
         <div class="d-arrow">↓</div>
         <div class="demo-row"><div class="d-tag dt2">⚡ Extracted</div><div class="d-text">Customer: <strong>Suresh, Dilsukhnagar</strong> · 50 × Iron Rods @ ₹800 · CGST 9% + SGST 9% · <strong>Total: ₹47,200</strong></div></div>
         <div class="d-arrow">↓</div>
-        <div class="demo-row"><div class="d-tag dt3">📄 Delivered</div><div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF with all fields, tax breakup, and business details — on WhatsApp in <strong>28 seconds ✅</strong></div></div>
+        <div class="demo-row"><div class="d-tag dt3">📄 Delivered</div><div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF with all fields and tax breakup — on WhatsApp in <strong>28 seconds ✅</strong></div></div>
       </div>
     </div>
   </div>
 </section>
-
 <section class="section section-alt" id="types">
   <div class="center-col">
     <div class="s-label">Invoice Types</div>
     <h2 class="s-title">Right Invoice, Every Time</h2>
-    <p class="s-sub">GutInvoice automatically picks the correct format based on your business — no manual selection needed.</p>
+    <p class="s-sub">GutInvoice automatically picks the correct format — no manual selection needed.</p>
   </div>
   <div class="inv-grid">
     <div class="inv-card ic1"><div class="i-badge ib1">GST Registered</div><h3>🧾 Tax Invoice</h3><div class="who">For businesses registered under GST</div><ul><li>Your GSTIN on every invoice</li><li>CGST + SGST breakdown</li><li>Customer claims tax credit</li><li>Mandatory for B2B above ₹50,000</li></ul></div>
@@ -235,18 +233,17 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <div class="inv-card ic3"><div class="i-badge ib3">Unregistered</div><h3>📃 Invoice</h3><div class="who">For small businesses without GST</div><ul><li>No GSTIN required</li><li>No tax calculations needed</li><li>Clean professional layout</li><li>Perfect for small traders</li></ul></div>
   </div>
 </section>
-
 <section class="section" id="pricing">
   <div class="center-col">
     <div class="s-label">Pricing</div>
     <h2 class="s-title">One Simple Price.<br/>No Surprises.</h2>
-    <p class="s-sub">No per-invoice fees. No hidden charges. Flat monthly price that saves you hours every week.</p>
+    <p class="s-sub">No per-invoice fees. No hidden charges. Flat monthly price.</p>
   </div>
   <div class="price-wrap">
     <div class="price-box">
       <div class="price-amt">₹199</div>
       <div class="price-per">/month</div>
-      <p class="price-note">Cancel anytime. No contracts. Start with 3 free invoices — no payment needed.</p>
+      <p class="price-note">Cancel anytime. No contracts. Start with 3 free invoices.</p>
       <ul class="price-list">
         <li><span class="chk">✓</span> Unlimited invoices every month</li>
         <li><span class="chk">✓</span> All 3 GST invoice types</li>
@@ -259,7 +256,6 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     </div>
   </div>
 </section>
-
 <footer>
   <div><div class="f-logo">Gut<span>Invoice</span></div><div class="f-tag">Every Invoice has a Voice — మీ గొంతే మీ Invoice</div></div>
   <div class="f-right">Built for Telugu-speaking MSMEs · Hyderabad, India<br/>© 2026 GutInvoice. All rights reserved.</div>
@@ -281,14 +277,14 @@ def download_audio(media_url):
     return r.content
 
 
-# ─── Step 2: Transcribe — FIX: saaras:v2.5 ───────────────────────────────────
+# ─── Step 2: Transcribe ✅ FIX: saaras:v2.5 ──────────────────────────────────
 def transcribe_audio(audio_bytes):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text-translate",
         headers={"API-Subscription-Key": env("SARVAM_API_KEY")},
         files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
         data={
-            "model": "saaras:v2.5",            # ✅ FIXED
+            "model": "saaras:v2.5",
             "source_language_code": "te-IN",
             "target_language_code": "en-IN"
         },
@@ -302,7 +298,7 @@ def transcribe_audio(audio_bytes):
     return transcript
 
 
-# ─── Step 3: Extract invoice — FIX: robust JSON extraction ───────────────────
+# ─── Step 3: Extract invoice ✅ FIX: robust JSON extraction ──────────────────
 def extract_invoice_data(transcript, seller_info):
     today = datetime.now().strftime("%d/%m/%Y")
     inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -318,13 +314,13 @@ Date: {today}, Invoice No: {inv_no}
 
 Rules:
 - invoice_type: "TAX INVOICE" (has GSTIN) | "BILL OF SUPPLY" (composition) | "INVOICE" (unregistered)
-- Intra-state: use CGST+SGST (split equally). Inter-state: use IGST only.
+- Intra-state: CGST+SGST split equally. Inter-state: IGST only.
 - amount = qty x rate. total_amount = taxable_value + all taxes.
 - Default GST 18% if not mentioned.
 - BILL OF SUPPLY declaration: "Composition taxable person, not eligible to collect tax on supplies"
 - INVOICE declaration: "Seller not registered under GST. GST not applicable."
 
-Return ONLY this JSON, no other text:
+Return ONLY this JSON, no extra text:
 {{"invoice_type":"TAX INVOICE","seller_name":"{seller_info.get('seller_name','')}","seller_address":"{seller_info.get('seller_address','')}","seller_gstin":"{seller_info.get('seller_gstin','')}","invoice_number":"{inv_no}","invoice_date":"{today}","customer_name":"","customer_address":"","customer_gstin":"","place_of_supply":"Telangana","reverse_charge":"No","items":[{{"sno":1,"description":"","hsn_sac":"","qty":0,"unit":"Nos","rate":0,"amount":0}}],"taxable_value":0,"cgst_rate":9,"cgst_amount":0,"sgst_rate":9,"sgst_amount":0,"igst_rate":0,"igst_amount":0,"total_amount":0,"declaration":"","payment_terms":"Pay within 15 days"}}"""
 
     claude = get_claude()
@@ -334,15 +330,15 @@ Return ONLY this JSON, no other text:
         messages=[{"role": "user", "content": prompt}]
     )
     text = msg.content[0].text.strip()
-    log.info(f"Claude raw response: {text[:300]}")
+    log.info(f"Claude raw: {text[:300]}")
 
-    # ✅ FIX: robustly extract JSON from any response format
+    # Clean markdown code blocks if present
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
 
-    # Find the JSON object boundaries
+    # Robustly find JSON boundaries
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end == 0:
@@ -354,7 +350,7 @@ Return ONLY this JSON, no other text:
     return data
 
 
-# ─── Step 4: Generate PDF — FIX: carbone-version:5 + ?download=true ──────────
+# ─── Step 4: Generate PDF ✅ FIX: carbone-version:5, ?download=true&versioning=true
 def generate_pdf(invoice_data):
     t = invoice_data.get("invoice_type", "TAX INVOICE")
     if "BILL" in t:
@@ -364,21 +360,25 @@ def generate_pdf(invoice_data):
     else:
         tid = env("CARBONE_NONGST_ID")
 
+    log.info(f"Using template ID: {tid} for {t}")
+
     r = requests.post(
-        f"https://api.carbone.io/render/{tid}?download=true",   # ✅ FIXED
+        f"https://api.carbone.io/render/{tid}?download=true&versioning=true",
         headers={
             "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
             "Content-Type": "application/json",
-            "carbone-version": "5"                               # ✅ FIXED
+            "carbone-version": "5"
         },
         json={"data": invoice_data, "convertTo": "pdf"},
         timeout=60
     )
     if r.status_code != 200:
-        raise Exception(f"PDF generation error {r.status_code}: {r.text}")
+        raise Exception(f"PDF error {r.status_code}: {r.text}")
+
     rid = r.json().get("data", {}).get("renderId")
     if not rid:
-        raise Exception(f"No renderId returned: {r.json()}")
+        raise Exception(f"No renderId: {r.json()}")
+
     url = f"https://api.carbone.io/render/{rid}"
     log.info(f"PDF ready: {url}")
     return url
@@ -401,7 +401,7 @@ def send_whatsapp(to, pdf_url, invoice_data):
         body=body,
         media_url=[pdf_url]
     )
-    log.info(f"WhatsApp sent: {msg.sid}")
+    log.info(f"Sent: {msg.sid}")
 
 
 def get_seller_info(from_number):
@@ -454,11 +454,11 @@ def webhook():
         audio      = download_audio(media_url)
         transcript = transcribe_audio(audio)
         if not transcript:
-            raise Exception("Could not understand the voice note. Please try again.")
+            raise Exception("Could not understand voice note. Please try again.")
         invoice    = extract_invoice_data(transcript, seller)
         pdf_url    = generate_pdf(invoice)
         send_whatsapp(from_num, pdf_url, invoice)
-        log.info("✅ Invoice generated and delivered!")
+        log.info("✅ Done!")
         return Response("OK", status=200)
 
     except Exception as e:
@@ -473,7 +473,7 @@ def webhook():
         return Response("Error", status=500)
 
 
-# ─── Health Check ─────────────────────────────────────────────────────────────
+# ─── Health ───────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     keys = ["TWILIO_ACCOUNT_SID","SARVAM_API_KEY","CLAUDE_API_KEY","CARBONE_API_KEY","CARBONE_TAX_ID","CARBONE_BOS_ID","CARBONE_NONGST_ID"]
@@ -489,5 +489,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v5 starting on port {port}")
+    log.info(f"🚀 GutInvoice v6 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
