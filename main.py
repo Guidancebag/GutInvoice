@@ -1,7 +1,7 @@
 """
 GutInvoice — Every Invoice has a Voice
 India's First Voice-First WhatsApp Invoice Generator for Telugu MSMEs
-v4 — All fixes applied: saaras:v2.5, carbone-version:5, ?download=true
+v5 — All fixes: saaras:v2.5, carbone-version:5, ?download=true, JSON extraction fix
 """
 
 import os
@@ -36,14 +36,12 @@ HOME_HTML = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{--orange:#FF6B35;--navy:#0A0F1E;--green:#10B981;--card:#111827}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--navy);color:#fff;min-height:100vh;overflow-x:hidden}
-
 nav{display:flex;justify-content:space-between;align-items:center;padding:18px 60px;border-bottom:1px solid rgba(255,107,53,0.12);background:rgba(10,15,30,0.98);position:sticky;top:0;z-index:100;backdrop-filter:blur(12px)}
 .logo{font-size:24px;font-weight:900;color:var(--orange)}.logo span{color:#fff}
 .logo-sub{font-size:11px;color:#475569;margin-top:3px;letter-spacing:1px;text-transform:uppercase}
 .live-pill{display:flex;align-items:center;gap:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);padding:8px 18px;border-radius:50px;font-size:12px;color:var(--green);font-weight:700;letter-spacing:0.5px}
 .live-dot{width:7px;height:7px;background:var(--green);border-radius:50%;animation:blink 2s infinite}
 @keyframes blink{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(16,185,129,0.5)}50%{opacity:0.4;box-shadow:0 0 0 5px transparent}}
-
 .hero{min-height:90vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:80px 40px;position:relative}
 .hero::before{content:'';position:absolute;width:900px;height:900px;background:radial-gradient(circle,rgba(255,107,53,0.07) 0%,transparent 65%);top:-300px;left:50%;transform:translateX(-50%);pointer-events:none}
 .hero-chip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,107,53,0.07);border:1px solid rgba(255,107,53,0.25);color:var(--orange);padding:8px 22px;border-radius:50px;font-size:13px;font-weight:700;margin-bottom:36px;letter-spacing:0.3px;position:relative;z-index:1}
@@ -52,7 +50,6 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .hero-desc{font-size:clamp(16px,2.2vw,20px);color:#64748B;max-width:580px;line-height:1.7;margin-bottom:16px;position:relative;z-index:1}
 .hero-telugu{font-size:16px;color:#475569;font-style:italic;margin-bottom:52px;position:relative;z-index:1}
 .hero-telugu span{color:#FBBF24}
-
 .flow-visual{display:flex;align-items:center;justify-content:center;gap:0;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:20px;padding:28px 40px;margin-bottom:52px;flex-wrap:wrap;position:relative;z-index:1;max-width:820px}
 .fv-step{display:flex;flex-direction:column;align-items:center;gap:10px;padding:0 18px}
 .fv-icon{width:54px;height:54px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:24px}
@@ -62,44 +59,36 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .fv4{background:rgba(236,72,153,0.1);border:1px solid rgba(236,72,153,0.2)}
 .fv-label{font-size:11px;color:#64748B;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;white-space:nowrap}
 .fv-arrow{font-size:20px;color:rgba(255,107,53,0.3);padding:0 4px;margin-top:-20px}
-
 .btn-group{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;position:relative;z-index:1}
 .btn-primary{background:var(--orange);color:#fff;padding:15px 36px;border-radius:50px;font-size:15px;font-weight:800;text-decoration:none;box-shadow:0 0 30px rgba(255,107,53,0.25);transition:all 0.2s}
 .btn-primary:hover{background:#e85d25;transform:translateY(-2px);box-shadow:0 0 45px rgba(255,107,53,0.4)}
 .btn-secondary{background:transparent;color:#64748B;padding:15px 36px;border-radius:50px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid rgba(255,255,255,0.08);transition:all 0.2s}
 .btn-secondary:hover{border-color:rgba(255,107,53,0.3);color:var(--orange)}
-
 .stats-bar{display:flex;justify-content:center;gap:0;border-top:1px solid rgba(255,255,255,0.04);border-bottom:1px solid rgba(255,255,255,0.04);flex-wrap:wrap}
 .stat-item{padding:44px 60px;text-align:center;border-right:1px solid rgba(255,255,255,0.04);flex:1;min-width:160px}
 .stat-item:last-child{border-right:none}
 .stat-n{font-size:44px;font-weight:900;color:var(--orange);letter-spacing:-2px;line-height:1}
 .stat-l{font-size:12px;color:#475569;margin-top:8px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px}
-
 .section{padding:96px 40px}
 .section-alt{background:rgba(255,255,255,0.012)}
 .s-label{display:inline-block;background:rgba(255,107,53,0.07);border:1px solid rgba(255,107,53,0.18);color:var(--orange);padding:5px 14px;border-radius:50px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:18px}
 .s-title{font-size:clamp(28px,4vw,50px);font-weight:900;letter-spacing:-1.5px;margin-bottom:16px;line-height:1.1}
 .s-sub{color:#64748B;font-size:17px;line-height:1.75;max-width:560px}
 .center-col{display:flex;flex-direction:column;align-items:center;text-align:center}
-
 .promise-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1px;max-width:1200px;margin:64px auto 0;background:rgba(255,255,255,0.04);border-radius:24px;overflow:hidden;border:1px solid rgba(255,255,255,0.04)}
-.promise-card{padding:44px;background:var(--navy);transition:background 0.2s;position:relative}
+.promise-card{padding:44px;background:var(--navy);transition:background 0.2s}
 .promise-card:hover{background:rgba(255,107,53,0.025)}
 .p-icon{font-size:40px;margin-bottom:20px}
 .p-title{font-size:19px;font-weight:800;margin-bottom:10px;color:#F1F5F9}
 .p-desc{font-size:14px;color:#64748B;line-height:1.75}
 .p-hl{color:var(--orange);font-weight:700}
-
 .how-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px;max-width:1100px;margin:64px auto 0}
-.how-card{background:var(--card);border:1px solid rgba(255,255,255,0.05);border-radius:20px;padding:36px;position:relative;overflow:hidden;transition:transform 0.2s,border-color 0.2s}
+.how-card{background:var(--card);border:1px solid rgba(255,255,255,0.05);border-radius:20px;padding:36px;transition:transform 0.2s,border-color 0.2s}
 .how-card:hover{transform:translateY(-3px);border-color:rgba(255,107,53,0.2)}
-.how-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--orange);opacity:0}
-.how-card:hover::before{opacity:1}
 .how-num{font-size:11px;font-weight:900;color:var(--orange);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:20px;opacity:0.8}
 .how-icon{font-size:38px;margin-bottom:18px}
 .how-title{font-size:17px;font-weight:800;margin-bottom:10px}
 .how-desc{font-size:13px;color:#64748B;line-height:1.7}
-
 .demo-wrap{max-width:720px;margin:64px auto 0}
 .demo-box{background:var(--card);border:1px solid rgba(255,255,255,0.06);border-radius:20px;overflow:hidden}
 .demo-bar{background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.05);padding:14px 20px;display:flex;align-items:center;gap:8px}
@@ -116,7 +105,6 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .d-text .te{color:#FBBF24;font-weight:600}
 .d-text .en{color:#34D399;font-weight:600}
 .d-arrow{text-align:center;color:rgba(255,107,53,0.3);font-size:18px;margin:4px 0}
-
 .inv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;max-width:1000px;margin:64px auto 0}
 .inv-card{border-radius:20px;padding:36px;border:1px solid;transition:transform 0.2s;position:relative;overflow:hidden}
 .inv-card:hover{transform:translateY(-4px)}
@@ -135,7 +123,6 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .inv-card li:last-child{border-bottom:none}
 .inv-card li::before{content:'✓';position:absolute;left:0;font-weight:900;font-size:12px}
 .ic1 li::before{color:var(--orange)}.ic2 li::before{color:#818CF8}.ic3 li::before{color:var(--green)}
-
 .price-wrap{max-width:460px;margin:64px auto 0}
 .price-box{background:var(--card);border:1px solid rgba(255,107,53,0.18);border-radius:24px;padding:50px;text-align:center;position:relative;overflow:hidden}
 .price-box::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--orange),#FF9A6C)}
@@ -146,43 +133,24 @@ nav{display:flex;justify-content:space-between;align-items:center;padding:18px 6
 .price-list li{padding:11px 0;font-size:15px;color:#94A3B8;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;align-items:center;gap:10px}
 .price-list li:last-child{border-bottom:none}
 .chk{color:var(--green);font-weight:900;font-size:16px}
-
 footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:20px}
 .f-logo{font-size:20px;font-weight:900;color:var(--orange)}.f-logo span{color:#fff}
 .f-tag{font-size:12px;color:#374151;margin-top:4px}
 .f-right{font-size:12px;color:#374151;text-align:right;line-height:1.8}
-
-@media(max-width:768px){
-  nav{padding:16px 20px}
-  .hero{padding:60px 20px}
-  .flow-visual{padding:20px 16px;gap:6px}
-  .fv-arrow{display:none}
-  .fv-step{padding:0 8px}
-  .stats-bar{flex-direction:column}
-  .stat-item{border-right:none;border-bottom:1px solid rgba(255,255,255,0.04);padding:28px 20px}
-  .section{padding:64px 20px}
-  footer{flex-direction:column;text-align:center;padding:40px 20px}
-  .f-right{text-align:center}
-}
+@media(max-width:768px){nav{padding:16px 20px}.hero{padding:60px 20px}.flow-visual{padding:20px 16px}.fv-arrow{display:none}.fv-step{padding:0 8px}.stats-bar{flex-direction:column}.stat-item{border-right:none;border-bottom:1px solid rgba(255,255,255,0.04);padding:28px 20px}.section{padding:64px 20px}footer{flex-direction:column;text-align:center;padding:40px 20px}.f-right{text-align:center}}
 </style>
 </head>
 <body>
-
 <nav>
-  <div>
-    <div class="logo">Gut<span>Invoice</span></div>
-    <div class="logo-sub">Every Invoice has a Voice</div>
-  </div>
+  <div><div class="logo">Gut<span>Invoice</span></div><div class="logo-sub">Every Invoice has a Voice</div></div>
   <div class="live-pill"><span class="live-dot"></span>LIVE</div>
 </nav>
 
-<!-- HERO -->
 <section class="hero">
   <div class="hero-chip">🇮🇳 Made for Telugu-speaking Business Owners</div>
   <h1>Your Voice.<br/>Your <em>Invoice.</em></h1>
   <p class="hero-desc">Send a WhatsApp voice note in Telugu or English — get a professional GST invoice PDF delivered back in under 30 seconds. No app. No typing. No hassle.</p>
   <p class="hero-telugu">మాట్లాడండి — <span>Invoice వస్తుంది.</span> అంతే.</p>
-
   <div class="flow-visual">
     <div class="fv-step"><div class="fv-icon fv1">🎙️</div><div class="fv-label">You Speak</div></div>
     <div class="fv-arrow">→</div>
@@ -192,14 +160,12 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <div class="fv-arrow">→</div>
     <div class="fv-step"><div class="fv-icon fv4">💬</div><div class="fv-label">WhatsApp Delivered</div></div>
   </div>
-
   <div class="btn-group">
     <a href="#how" class="btn-primary">How It Works</a>
     <a href="#pricing" class="btn-secondary">See Pricing →</a>
   </div>
 </section>
 
-<!-- STATS -->
 <div class="stats-bar">
   <div class="stat-item"><div class="stat-n">30s</div><div class="stat-l">Invoice Delivery</div></div>
   <div class="stat-item"><div class="stat-n">3</div><div class="stat-l">Invoice Types</div></div>
@@ -207,7 +173,6 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
   <div class="stat-item"><div class="stat-n">₹199</div><div class="stat-l">Per Month</div></div>
 </div>
 
-<!-- WHAT WE DELIVER -->
 <section class="section" id="promise">
   <div class="center-col">
     <div class="s-label">What You Get</div>
@@ -215,75 +180,29 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <p class="s-sub">No complicated software. No CA needed for every invoice. Just speak on WhatsApp and your invoice is ready.</p>
   </div>
   <div class="promise-grid">
-    <div class="promise-card">
-      <div class="p-icon">🎙️</div>
-      <div class="p-title">Speak in Your Language</div>
-      <p class="p-desc">Use <span class="p-hl">Telugu, English, or a mix</span> of both — exactly how you speak every day. No need to learn any new system or language.</p>
-    </div>
-    <div class="promise-card">
-      <div class="p-icon">📲</div>
-      <div class="p-title">Only WhatsApp Needed</div>
-      <p class="p-desc">No app to download. No website to visit. No login. <span class="p-hl">Just the WhatsApp you already use</span> every day on your phone.</p>
-    </div>
-    <div class="promise-card">
-      <div class="p-icon">📄</div>
-      <div class="p-title">Professional GST Invoice PDF</div>
-      <p class="p-desc">Get a <span class="p-hl">proper GST-compliant invoice PDF</span> with your business name, GSTIN, tax breakup, and all required fields — in 30 seconds.</p>
-    </div>
-    <div class="promise-card">
-      <div class="p-icon">⚡</div>
-      <div class="p-title">Ready in 30 Seconds</div>
-      <p class="p-desc">From voice note to PDF on your phone in <span class="p-hl">under 30 seconds</span>. Send it directly to your customer without any delay.</p>
-    </div>
-    <div class="promise-card">
-      <div class="p-icon">🏪</div>
-      <div class="p-title">Remembers Your Business</div>
-      <p class="p-desc">Set up your business name, address, and GSTIN once. <span class="p-hl">Every invoice after that is automatic</span> — no need to repeat details.</p>
-    </div>
-    <div class="promise-card">
-      <div class="p-icon">✅</div>
-      <div class="p-title">GST Compliant Always</div>
-      <p class="p-desc">All 3 invoice formats supported — <span class="p-hl">Tax Invoice, Bill of Supply, and plain Invoice</span> — auto-selected based on your business type.</p>
-    </div>
+    <div class="promise-card"><div class="p-icon">🎙️</div><div class="p-title">Speak in Your Language</div><p class="p-desc">Use <span class="p-hl">Telugu, English, or a mix</span> of both — exactly how you speak every day. No need to learn anything new.</p></div>
+    <div class="promise-card"><div class="p-icon">📲</div><div class="p-title">Only WhatsApp Needed</div><p class="p-desc">No app to download. No website to visit. No login. <span class="p-hl">Just the WhatsApp you already use</span> every day.</p></div>
+    <div class="promise-card"><div class="p-icon">📄</div><div class="p-title">Professional GST Invoice PDF</div><p class="p-desc">Get a <span class="p-hl">proper GST-compliant invoice PDF</span> with your business name, GSTIN, tax breakup — in 30 seconds.</p></div>
+    <div class="promise-card"><div class="p-icon">⚡</div><div class="p-title">Ready in 30 Seconds</div><p class="p-desc">From voice note to PDF on your phone in <span class="p-hl">under 30 seconds</span>. Send it directly to your customer.</p></div>
+    <div class="promise-card"><div class="p-icon">🏪</div><div class="p-title">Remembers Your Business</div><p class="p-desc">Set up your details once. <span class="p-hl">Every invoice after that is automatic</span> — no need to repeat your business name or GSTIN.</p></div>
+    <div class="promise-card"><div class="p-icon">✅</div><div class="p-title">Always GST Compliant</div><p class="p-desc">All 3 invoice types supported — <span class="p-hl">Tax Invoice, Bill of Supply, plain Invoice</span> — auto-selected for your business.</p></div>
   </div>
 </section>
 
-<!-- HOW IT WORKS -->
 <section class="section section-alt" id="how">
   <div class="center-col">
     <div class="s-label">How It Works</div>
-    <h2 class="s-title">4 Steps.<br/>30 Seconds.</h2>
+    <h2 class="s-title">4 Steps. 30 Seconds.</h2>
     <p class="s-sub">The simplest invoice process ever built for an Indian small business owner.</p>
   </div>
   <div class="how-steps">
-    <div class="how-card">
-      <div class="how-num">Step 01</div>
-      <div class="how-icon">🎙️</div>
-      <div class="how-title">Send a Voice Note</div>
-      <p class="how-desc">Open WhatsApp. Send a voice note to your GutInvoice number. Say your customer name, items, quantity, price, and GST.</p>
-    </div>
-    <div class="how-card">
-      <div class="how-num">Step 02</div>
-      <div class="how-icon">🧏</div>
-      <div class="how-title">We Listen & Understand</div>
-      <p class="how-desc">GutInvoice understands your voice in Telugu, English, or any mix. Even casual speech is understood correctly.</p>
-    </div>
-    <div class="how-card">
-      <div class="how-num">Step 03</div>
-      <div class="how-icon">🔢</div>
-      <div class="how-title">Invoice is Built</div>
-      <p class="how-desc">Customer details, item names, quantities, rates, CGST, SGST, IGST — everything is calculated and filled automatically.</p>
-    </div>
-    <div class="how-card">
-      <div class="how-num">Step 04</div>
-      <div class="how-icon">💬</div>
-      <div class="how-title">PDF on WhatsApp</div>
-      <p class="how-desc">Your professional GST invoice PDF arrives on WhatsApp in under 30 seconds. Forward it directly to your customer.</p>
-    </div>
+    <div class="how-card"><div class="how-num">Step 01</div><div class="how-icon">🎙️</div><div class="how-title">Send a Voice Note</div><p class="how-desc">Open WhatsApp. Send a voice note to your GutInvoice number. Say your customer name, items, quantity, price, and GST rate.</p></div>
+    <div class="how-card"><div class="how-num">Step 02</div><div class="how-icon">🧏</div><div class="how-title">We Listen & Understand</div><p class="how-desc">GutInvoice understands your voice in Telugu, English, or any mix. Even casual speech is understood correctly.</p></div>
+    <div class="how-card"><div class="how-num">Step 03</div><div class="how-icon">🔢</div><div class="how-title">Invoice is Built</div><p class="how-desc">Customer details, items, quantities, rates, CGST, SGST, IGST — everything calculated and filled automatically.</p></div>
+    <div class="how-card"><div class="how-num">Step 04</div><div class="how-icon">💬</div><div class="how-title">PDF on WhatsApp</div><p class="how-desc">Your professional GST invoice PDF arrives on WhatsApp in under 30 seconds. Forward it directly to your customer.</p></div>
   </div>
 </section>
 
-<!-- LIVE EXAMPLE -->
 <section class="section" id="demo">
   <div class="center-col">
     <div class="s-label">Live Example</div>
@@ -292,78 +211,31 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
   </div>
   <div class="demo-wrap">
     <div class="demo-box">
-      <div class="demo-bar">
-        <div class="db db1"></div><div class="db db2"></div><div class="db db3"></div>
-        <span style="font-size:12px;color:#475569;margin-left:10px;font-weight:600">GutInvoice — Live</span>
-      </div>
+      <div class="demo-bar"><div class="db db1"></div><div class="db db2"></div><div class="db db3"></div><span style="font-size:12px;color:#475569;margin-left:10px;font-weight:600">GutInvoice — Live Processing</span></div>
       <div class="demo-inner">
-        <div class="demo-row">
-          <div class="d-tag dt1">🎙️ You Say</div>
-          <div class="d-text">"<span class="te">Customer Suresh</span>, <span class="te">Dilsukhnagar</span>, <span class="en">50 iron rods</span>, <span class="te">ఒక్కొక్కటి</span> <span class="en">800 rupees</span>, <span class="en">18% GST</span>, <span class="te">15 రోజుల్లో pay చేయాలి</span>"</div>
-        </div>
+        <div class="demo-row"><div class="d-tag dt1">🎙️ You Say</div><div class="d-text">"<span class="te">Customer Suresh</span>, <span class="te">Dilsukhnagar</span>, <span class="en">50 iron rods</span>, <span class="te">ఒక్కొక్కటి</span> <span class="en">800 rupees</span>, <span class="en">18% GST</span>, <span class="te">15 రోజుల్లో pay చేయాలి</span>"</div></div>
         <div class="d-arrow">↓</div>
-        <div class="demo-row">
-          <div class="d-tag dt2">⚡ Extracted</div>
-          <div class="d-text">Customer: <strong>Suresh, Dilsukhnagar</strong> · 50 × Iron Rods @ ₹800 · CGST 9% + SGST 9% · <strong>Total: ₹47,200</strong></div>
-        </div>
+        <div class="demo-row"><div class="d-tag dt2">⚡ Extracted</div><div class="d-text">Customer: <strong>Suresh, Dilsukhnagar</strong> · 50 × Iron Rods @ ₹800 · CGST 9% + SGST 9% · <strong>Total: ₹47,200</strong></div></div>
         <div class="d-arrow">↓</div>
-        <div class="demo-row">
-          <div class="d-tag dt3">📄 Delivered</div>
-          <div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF with all fields, tax breakup, and business details — on WhatsApp in <strong>28 seconds ✅</strong></div>
-        </div>
+        <div class="demo-row"><div class="d-tag dt3">📄 Delivered</div><div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF with all fields, tax breakup, and business details — on WhatsApp in <strong>28 seconds ✅</strong></div></div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- INVOICE TYPES -->
 <section class="section section-alt" id="types">
   <div class="center-col">
     <div class="s-label">Invoice Types</div>
-    <h2 class="s-title">Right Invoice,<br/>Every Time</h2>
+    <h2 class="s-title">Right Invoice, Every Time</h2>
     <p class="s-sub">GutInvoice automatically picks the correct format based on your business — no manual selection needed.</p>
   </div>
   <div class="inv-grid">
-    <div class="inv-card ic1">
-      <div class="i-badge ib1">GST Registered</div>
-      <h3>🧾 Tax Invoice</h3>
-      <div class="who">For businesses registered under GST</div>
-      <ul>
-        <li>Your GSTIN on every invoice</li>
-        <li>CGST + SGST breakdown</li>
-        <li>Your customer claims tax credit</li>
-        <li>Mandatory for B2B above ₹50,000</li>
-        <li>Fully compliant format</li>
-      </ul>
-    </div>
-    <div class="inv-card ic2">
-      <div class="i-badge ib2">Composition Scheme</div>
-      <h3>📝 Bill of Supply</h3>
-      <div class="who">For composition scheme businesses</div>
-      <ul>
-        <li>No tax rows — clean format</li>
-        <li>Required GST declaration included</li>
-        <li>Automatically detected</li>
-        <li>100% GST compliant</li>
-        <li>Simple and professional</li>
-      </ul>
-    </div>
-    <div class="inv-card ic3">
-      <div class="i-badge ib3">Unregistered</div>
-      <h3>📃 Invoice</h3>
-      <div class="who">For small businesses without GST</div>
-      <ul>
-        <li>No GSTIN required</li>
-        <li>No tax calculations needed</li>
-        <li>Clean professional layout</li>
-        <li>Correct declaration included</li>
-        <li>Perfect for small traders</li>
-      </ul>
-    </div>
+    <div class="inv-card ic1"><div class="i-badge ib1">GST Registered</div><h3>🧾 Tax Invoice</h3><div class="who">For businesses registered under GST</div><ul><li>Your GSTIN on every invoice</li><li>CGST + SGST breakdown</li><li>Customer claims tax credit</li><li>Mandatory for B2B above ₹50,000</li></ul></div>
+    <div class="inv-card ic2"><div class="i-badge ib2">Composition Scheme</div><h3>📝 Bill of Supply</h3><div class="who">For composition scheme businesses</div><ul><li>No tax rows — clean format</li><li>Required GST declaration included</li><li>Automatically detected</li><li>100% GST compliant</li></ul></div>
+    <div class="inv-card ic3"><div class="i-badge ib3">Unregistered</div><h3>📃 Invoice</h3><div class="who">For small businesses without GST</div><ul><li>No GSTIN required</li><li>No tax calculations needed</li><li>Clean professional layout</li><li>Perfect for small traders</li></ul></div>
   </div>
 </section>
 
-<!-- PRICING -->
 <section class="section" id="pricing">
   <div class="center-col">
     <div class="s-label">Pricing</div>
@@ -389,16 +261,9 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
 </section>
 
 <footer>
-  <div>
-    <div class="f-logo">Gut<span>Invoice</span></div>
-    <div class="f-tag">Every Invoice has a Voice — మీ గొంతే మీ Invoice</div>
-  </div>
-  <div class="f-right">
-    Built for Telugu-speaking MSMEs · Hyderabad, India<br/>
-    © 2026 GutInvoice. All rights reserved.
-  </div>
+  <div><div class="f-logo">Gut<span>Invoice</span></div><div class="f-tag">Every Invoice has a Voice — మీ గొంతే మీ Invoice</div></div>
+  <div class="f-right">Built for Telugu-speaking MSMEs · Hyderabad, India<br/>© 2026 GutInvoice. All rights reserved.</div>
 </footer>
-
 </body></html>"""
 
 
@@ -416,14 +281,14 @@ def download_audio(media_url):
     return r.content
 
 
-# ─── Step 2: Transcribe — FIXED: saaras:v2.5 ─────────────────────────────────
+# ─── Step 2: Transcribe — FIX: saaras:v2.5 ───────────────────────────────────
 def transcribe_audio(audio_bytes):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text-translate",
         headers={"API-Subscription-Key": env("SARVAM_API_KEY")},
         files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
         data={
-            "model": "saaras:v2.5",           # ✅ FIXED
+            "model": "saaras:v2.5",            # ✅ FIXED
             "source_language_code": "te-IN",
             "target_language_code": "en-IN"
         },
@@ -437,10 +302,11 @@ def transcribe_audio(audio_bytes):
     return transcript
 
 
-# ─── Step 3: Extract invoice with Claude ─────────────────────────────────────
+# ─── Step 3: Extract invoice — FIX: robust JSON extraction ───────────────────
 def extract_invoice_data(transcript, seller_info):
     today = datetime.now().strftime("%d/%m/%Y")
     inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
     prompt = f"""You are a GST invoice assistant for Indian small businesses.
 Extract invoice details from this transcript and return ONLY valid JSON.
 Seller may speak Telugu, English, or a mix of both.
@@ -469,21 +335,26 @@ Return ONLY this JSON, no other text:
     )
     text = msg.content[0].text.strip()
     log.info(f"Claude raw response: {text[:300]}")
+
+    # ✅ FIX: robustly extract JSON from any response format
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
-    # Find JSON object in response
+
+    # Find the JSON object boundaries
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end == 0:
-        raise Exception(f"No JSON found in Claude response: {text[:200]}")
+        raise Exception(f"No JSON found in response: {text[:200]}")
     text = text[start:end]
-    data = json.loads(text)  log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
+
+    data = json.loads(text)
+    log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
     return data
 
 
-# ─── Step 4: Generate PDF — FIXED: carbone-version:5 + ?download=true ─────────
+# ─── Step 4: Generate PDF — FIX: carbone-version:5 + ?download=true ──────────
 def generate_pdf(invoice_data):
     t = invoice_data.get("invoice_type", "TAX INVOICE")
     if "BILL" in t:
@@ -611,7 +482,6 @@ def health():
     return {"status":"healthy" if ok else "missing_config","checks":c,"timestamp":datetime.now().isoformat()}, 200 if ok else 500
 
 
-# ─── Homepage ─────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
     return render_template_string(HOME_HTML)
@@ -619,5 +489,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v4 starting on port {port}")
+    log.info(f"🚀 GutInvoice v5 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
