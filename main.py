@@ -180,7 +180,7 @@ def transcribe_audio(audio_bytes):
         "https://api.sarvam.ai/speech-to-text-translate",
         headers={"API-Subscription-Key": env("SARVAM_API_KEY")},
         files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-        data={"model": "saarika:v2.5", "source_language_code": "te-IN", "target_language_code": "en-IN"},
+        data={"model": "saaras:v2.5", "source_language_code": "te-IN", "target_language_code": "en-IN"},
         timeout=60
     )
     if r.status_code != 200:
