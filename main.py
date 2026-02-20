@@ -468,12 +468,18 @@ Return ONLY this JSON, no other text:
         messages=[{"role": "user", "content": prompt}]
     )
     text = msg.content[0].text.strip()
+    log.info(f"Claude raw response: {text[:300]}")
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
-    data = json.loads(text)
-    log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
+    # Find JSON object in response
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise Exception(f"No JSON found in Claude response: {text[:200]}")
+    text = text[start:end]
+    data = json.loads(text)  log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
     return data
 
 
