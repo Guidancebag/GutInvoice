@@ -1,11 +1,12 @@
 """
 GutInvoice — Every Invoice has a Voice
-v8 — Fixes "Expecting value: line 1 column 1 (char 0)" crash:
-  ✅ Safe JSON parsing with raw response logging at every API call
-  ✅ Sarvam: log raw response before .json(), handle empty transcript
-  ✅ Claude: handle empty / whitespace-only response
-  ✅ Carbone: log raw response before .json(), handle empty renderId
-  ✅ All previous v7 fixes retained (versionId, saaras:v2.5, carbone-version:5)
+v9 — Fix "Carbone-Render returned non-JSON: %PDF-1.7" crash:
+  ✅ REMOVED ?download=true from Carbone POST — it was returning raw PDF bytes
+     instead of JSON with renderId, causing json.loads() to crash
+  ✅ Now POST to /render/{versionId}?versioning=true only → get JSON renderId
+  ✅ Construct public PDF URL from renderId for Twilio media_url
+  ✅ All v8 safe_json + logging retained
+  ✅ All v7 fixes retained (versionId, saaras:v2.5, carbone-version:5)
 """
 
 import os
@@ -408,8 +409,11 @@ def generate_pdf(invoice_data):
 
     log.info(f"Using versionId: {version_id[:16]}... for {t}")
 
+    # ✅ v9 FIX: Remove ?download=true — it makes Carbone return raw PDF bytes
+    # instead of JSON. Without it, Carbone returns {"data": {"renderId": "..."}}
+    # and we construct the public URL from the renderId for Twilio to fetch.
     r = requests.post(
-        f"https://api.carbone.io/render/{version_id}?download=true&versioning=true",
+        f"https://api.carbone.io/render/{version_id}?versioning=true",
         headers={
             "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
             "Content-Type": "application/json",
@@ -534,7 +538,7 @@ def health():
     all_ok = all(checks.values())
     return {
         "status": "healthy" if all_ok else "missing_config",
-        "version": "v8",
+        "version": "v9",
         "checks": checks,
         "timestamp": datetime.now().isoformat()
     }, 200 if all_ok else 500
@@ -547,5 +551,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v8 starting on port {port}")
+    log.info(f"🚀 GutInvoice v9 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
