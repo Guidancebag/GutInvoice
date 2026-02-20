@@ -1,10 +1,14 @@
 """
 GutInvoice — Every Invoice has a Voice
-v6 — All fixes applied:
+v7 — versionId replaces numeric template ID in Carbone:
   ✅ saaras:v2.5 (Sarvam model)
   ✅ carbone-version: 5 (header)
   ✅ ?download=true (URL param)
-  ✅ versioning=true (URL param for numeric template ID)
+  ✅ versioning=true (URL param — REQUIRED when using versionId)
+  ✅ ENV VARS now hold versionId hash (not numeric id)
+      CARBONE_TAX_VERSION_ID   → versionId for Tax Invoice template
+      CARBONE_BOS_VERSION_ID   → versionId for Bill of Supply template
+      CARBONE_NONGST_VERSION_ID→ versionId for Non-GST Invoice template
   ✅ Robust JSON extraction
 """
 
@@ -277,7 +281,7 @@ def download_audio(media_url):
     return r.content
 
 
-# ─── Step 2: Transcribe ✅ FIX: saaras:v2.5 ──────────────────────────────────
+# ─── Step 2: Transcribe ───────────────────────────────────────────────────────
 def transcribe_audio(audio_bytes):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text-translate",
@@ -298,7 +302,7 @@ def transcribe_audio(audio_bytes):
     return transcript
 
 
-# ─── Step 3: Extract invoice ✅ FIX: robust JSON extraction ──────────────────
+# ─── Step 3: Extract invoice data ────────────────────────────────────────────
 def extract_invoice_data(transcript, seller_info):
     today = datetime.now().strftime("%d/%m/%Y")
     inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -350,20 +354,37 @@ Return ONLY this JSON, no extra text:
     return data
 
 
-# ─── Step 4: Generate PDF ✅ FIX: carbone-version:5, ?download=true&versioning=true
+# ─── Step 4: Generate PDF ─────────────────────────────────────────────────────
+# ✅ v7 CHANGE: env vars now hold versionId (hash) instead of numeric template id
+#    Railway env var names:
+#      CARBONE_TAX_VERSION_ID    → versionId from Tax Invoice template upload
+#      CARBONE_BOS_VERSION_ID    → versionId from Bill of Supply template upload
+#      CARBONE_NONGST_VERSION_ID → versionId from Non-GST Invoice template upload
+#
+#    How to get versionId: Upload your .docx template to Carbone once via:
+#      POST https://api.carbone.io/template
+#    The response gives you both id (numeric) and versionId (hash).
+#    Copy the versionId hash and paste it into the Railway env var.
+#
+#    versioning=true is REQUIRED in the URL when using versionId.
+# ─────────────────────────────────────────────────────────────────────────────
 def generate_pdf(invoice_data):
     t = invoice_data.get("invoice_type", "TAX INVOICE")
-    if "BILL" in t:
-        tid = env("CARBONE_BOS_ID")
-    elif "TAX" in t:
-        tid = env("CARBONE_TAX_ID")
-    else:
-        tid = env("CARBONE_NONGST_ID")
 
-    log.info(f"Using template ID: {tid} for {t}")
+    if "BILL" in t:
+        version_id = env("CARBONE_BOS_VERSION_ID")       # Bill of Supply versionId
+    elif "TAX" in t:
+        version_id = env("CARBONE_TAX_VERSION_ID")        # Tax Invoice versionId
+    else:
+        version_id = env("CARBONE_NONGST_VERSION_ID")     # Non-GST Invoice versionId
+
+    if not version_id:
+        raise Exception(f"Missing Carbone versionId for invoice type: {t}. Check Railway env vars.")
+
+    log.info(f"Using versionId: {version_id[:16]}... for {t}")
 
     r = requests.post(
-        f"https://api.carbone.io/render/{tid}?download=true&versioning=true",
+        f"https://api.carbone.io/render/{version_id}?download=true&versioning=true",
         headers={
             "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
             "Content-Type": "application/json",
@@ -377,11 +398,11 @@ def generate_pdf(invoice_data):
 
     rid = r.json().get("data", {}).get("renderId")
     if not rid:
-        raise Exception(f"No renderId: {r.json()}")
+        raise Exception(f"No renderId in response: {r.json()}")
 
-    url = f"https://api.carbone.io/render/{rid}"
-    log.info(f"PDF ready: {url}")
-    return url
+    pdf_url = f"https://api.carbone.io/render/{rid}"
+    log.info(f"PDF ready: {pdf_url}")
+    return pdf_url
 
 
 # ─── Step 5: Send WhatsApp ────────────────────────────────────────────────────
@@ -401,7 +422,7 @@ def send_whatsapp(to, pdf_url, invoice_data):
         body=body,
         media_url=[pdf_url]
     )
-    log.info(f"Sent: {msg.sid}")
+    log.info(f"WhatsApp sent: {msg.sid}")
 
 
 def get_seller_info(from_number):
@@ -458,7 +479,7 @@ def webhook():
         invoice    = extract_invoice_data(transcript, seller)
         pdf_url    = generate_pdf(invoice)
         send_whatsapp(from_num, pdf_url, invoice)
-        log.info("✅ Done!")
+        log.info("✅ Invoice delivered!")
         return Response("OK", status=200)
 
     except Exception as e:
@@ -473,13 +494,24 @@ def webhook():
         return Response("Error", status=500)
 
 
-# ─── Health ───────────────────────────────────────────────────────────────────
+# ─── Health check ─────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
-    keys = ["TWILIO_ACCOUNT_SID","SARVAM_API_KEY","CLAUDE_API_KEY","CARBONE_API_KEY","CARBONE_TAX_ID","CARBONE_BOS_ID","CARBONE_NONGST_ID"]
-    c = {k: bool(env(k)) for k in keys}
-    ok = all(c.values())
-    return {"status":"healthy" if ok else "missing_config","checks":c,"timestamp":datetime.now().isoformat()}, 200 if ok else 500
+    keys = [
+        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
+        "SARVAM_API_KEY", "CLAUDE_API_KEY", "CARBONE_API_KEY",
+        "CARBONE_TAX_VERSION_ID",     # ✅ v7: versionId (hash)
+        "CARBONE_BOS_VERSION_ID",     # ✅ v7: versionId (hash)
+        "CARBONE_NONGST_VERSION_ID"   # ✅ v7: versionId (hash)
+    ]
+    checks = {k: bool(env(k)) for k in keys}
+    all_ok = all(checks.values())
+    return {
+        "status": "healthy" if all_ok else "missing_config",
+        "version": "v7",
+        "checks": checks,
+        "timestamp": datetime.now().isoformat()
+    }, 200 if all_ok else 500
 
 
 @app.route("/")
@@ -489,5 +521,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v6 starting on port {port}")
+    log.info(f"🚀 GutInvoice v7 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
