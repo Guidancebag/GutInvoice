@@ -1,15 +1,11 @@
 """
 GutInvoice — Every Invoice has a Voice
-v7 — versionId replaces numeric template ID in Carbone:
-  ✅ saaras:v2.5 (Sarvam model)
-  ✅ carbone-version: 5 (header)
-  ✅ ?download=true (URL param)
-  ✅ versioning=true (URL param — REQUIRED when using versionId)
-  ✅ ENV VARS now hold versionId hash (not numeric id)
-      CARBONE_TAX_VERSION_ID   → versionId for Tax Invoice template
-      CARBONE_BOS_VERSION_ID   → versionId for Bill of Supply template
-      CARBONE_NONGST_VERSION_ID→ versionId for Non-GST Invoice template
-  ✅ Robust JSON extraction
+v8 — Fixes "Expecting value: line 1 column 1 (char 0)" crash:
+  ✅ Safe JSON parsing with raw response logging at every API call
+  ✅ Sarvam: log raw response before .json(), handle empty transcript
+  ✅ Claude: handle empty / whitespace-only response
+  ✅ Carbone: log raw response before .json(), handle empty renderId
+  ✅ All previous v7 fixes retained (versionId, saaras:v2.5, carbone-version:5)
 """
 
 import os
@@ -33,6 +29,24 @@ def get_claude():
 
 def env(key):
     return os.environ.get(key, "")
+
+
+# ─── Safe JSON helper ─────────────────────────────────────────────────────────
+def safe_json(response, label):
+    """
+    Parse response.json() safely.
+    Logs the raw text first so Railway logs show exactly what each API returned.
+    Raises a clear error if body is empty or not valid JSON.
+    """
+    raw = response.text.strip()
+    log.info(f"[{label}] HTTP {response.status_code} | raw: {raw[:300]}")
+    if not raw:
+        raise Exception(f"{label} returned empty response body (HTTP {response.status_code})")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise Exception(f"{label} returned non-JSON (HTTP {response.status_code}): {raw[:200]} | {e}")
+
 
 HOME_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -185,12 +199,12 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <p class="s-sub">No complicated software. No CA needed for every invoice. Just speak on WhatsApp and your invoice is ready.</p>
   </div>
   <div class="promise-grid">
-    <div class="promise-card"><div class="p-icon">🎙️</div><div class="p-title">Speak in Your Language</div><p class="p-desc">Use <span class="p-hl">Telugu, English, or a mix</span> of both — exactly how you speak every day. No need to learn anything new.</p></div>
+    <div class="promise-card"><div class="p-icon">🎙️</div><div class="p-title">Speak in Your Language</div><p class="p-desc">Use <span class="p-hl">Telugu, English, or a mix</span> of both — exactly how you speak every day.</p></div>
     <div class="promise-card"><div class="p-icon">📲</div><div class="p-title">Only WhatsApp Needed</div><p class="p-desc">No app to download. No website to visit. No login. <span class="p-hl">Just the WhatsApp you already use</span> every day.</p></div>
     <div class="promise-card"><div class="p-icon">📄</div><div class="p-title">Professional GST Invoice PDF</div><p class="p-desc">Get a <span class="p-hl">proper GST-compliant invoice PDF</span> with your business name, GSTIN, tax breakup — in 30 seconds.</p></div>
     <div class="promise-card"><div class="p-icon">⚡</div><div class="p-title">Ready in 30 Seconds</div><p class="p-desc">From voice note to PDF on your phone in <span class="p-hl">under 30 seconds</span>. Send it directly to your customer.</p></div>
-    <div class="promise-card"><div class="p-icon">🏪</div><div class="p-title">Remembers Your Business</div><p class="p-desc">Set up your details once. <span class="p-hl">Every invoice after that is automatic</span> — no need to repeat your business name or GSTIN.</p></div>
-    <div class="promise-card"><div class="p-icon">✅</div><div class="p-title">Always GST Compliant</div><p class="p-desc">All 3 invoice types supported — <span class="p-hl">Tax Invoice, Bill of Supply, plain Invoice</span> — auto-selected for your business.</p></div>
+    <div class="promise-card"><div class="p-icon">🏪</div><div class="p-title">Remembers Your Business</div><p class="p-desc">Set up your details once. <span class="p-hl">Every invoice after that is automatic</span>.</p></div>
+    <div class="promise-card"><div class="p-icon">✅</div><div class="p-title">Always GST Compliant</div><p class="p-desc">All 3 invoice types — <span class="p-hl">Tax Invoice, Bill of Supply, plain Invoice</span> — auto-selected.</p></div>
   </div>
 </section>
 <section class="section section-alt" id="how">
@@ -200,10 +214,10 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
     <p class="s-sub">The simplest invoice process ever built for an Indian small business owner.</p>
   </div>
   <div class="how-steps">
-    <div class="how-card"><div class="how-num">Step 01</div><div class="how-icon">🎙️</div><div class="how-title">Send a Voice Note</div><p class="how-desc">Open WhatsApp. Send a voice note to your GutInvoice number. Say your customer name, items, quantity, price, and GST rate.</p></div>
-    <div class="how-card"><div class="how-num">Step 02</div><div class="how-icon">🧏</div><div class="how-title">We Listen & Understand</div><p class="how-desc">GutInvoice understands your voice in Telugu, English, or any mix. Even casual speech is understood correctly.</p></div>
-    <div class="how-card"><div class="how-num">Step 03</div><div class="how-icon">🔢</div><div class="how-title">Invoice is Built</div><p class="how-desc">Customer details, items, quantities, rates, CGST, SGST, IGST — everything calculated and filled automatically.</p></div>
-    <div class="how-card"><div class="how-num">Step 04</div><div class="how-icon">💬</div><div class="how-title">PDF on WhatsApp</div><p class="how-desc">Your professional GST invoice PDF arrives on WhatsApp in under 30 seconds. Forward it directly to your customer.</p></div>
+    <div class="how-card"><div class="how-num">Step 01</div><div class="how-icon">🎙️</div><div class="how-title">Send a Voice Note</div><p class="how-desc">Open WhatsApp. Send a voice note with customer name, items, quantity, price, GST rate.</p></div>
+    <div class="how-card"><div class="how-num">Step 02</div><div class="how-icon">🧏</div><div class="how-title">We Listen & Understand</div><p class="how-desc">GutInvoice understands Telugu, English, or any mix. Even casual speech works.</p></div>
+    <div class="how-card"><div class="how-num">Step 03</div><div class="how-icon">🔢</div><div class="how-title">Invoice is Built</div><p class="how-desc">CGST, SGST, IGST — everything calculated and filled automatically.</p></div>
+    <div class="how-card"><div class="how-num">Step 04</div><div class="how-icon">💬</div><div class="how-title">PDF on WhatsApp</div><p class="how-desc">GST invoice PDF arrives on WhatsApp in under 30 seconds. Forward directly to your customer.</p></div>
   </div>
 </section>
 <section class="section" id="demo">
@@ -220,7 +234,7 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
         <div class="d-arrow">↓</div>
         <div class="demo-row"><div class="d-tag dt2">⚡ Extracted</div><div class="d-text">Customer: <strong>Suresh, Dilsukhnagar</strong> · 50 × Iron Rods @ ₹800 · CGST 9% + SGST 9% · <strong>Total: ₹47,200</strong></div></div>
         <div class="d-arrow">↓</div>
-        <div class="demo-row"><div class="d-tag dt3">📄 Delivered</div><div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF with all fields and tax breakup — on WhatsApp in <strong>28 seconds ✅</strong></div></div>
+        <div class="demo-row"><div class="d-tag dt3">📄 Delivered</div><div class="d-text">Professional <strong>GST Tax Invoice</strong> PDF — on WhatsApp in <strong>28 seconds ✅</strong></div></div>
       </div>
     </div>
   </div>
@@ -229,7 +243,7 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:48px 60px;display:fle
   <div class="center-col">
     <div class="s-label">Invoice Types</div>
     <h2 class="s-title">Right Invoice, Every Time</h2>
-    <p class="s-sub">GutInvoice automatically picks the correct format — no manual selection needed.</p>
+    <p class="s-sub">GutInvoice automatically picks the correct format.</p>
   </div>
   <div class="inv-grid">
     <div class="inv-card ic1"><div class="i-badge ib1">GST Registered</div><h3>🧾 Tax Invoice</h3><div class="who">For businesses registered under GST</div><ul><li>Your GSTIN on every invoice</li><li>CGST + SGST breakdown</li><li>Customer claims tax credit</li><li>Mandatory for B2B above ₹50,000</li></ul></div>
@@ -277,11 +291,11 @@ def download_audio(media_url):
         timeout=30
     )
     r.raise_for_status()
-    log.info(f"Audio: {len(r.content)} bytes | type: {r.headers.get('content-type')}")
+    log.info(f"Audio downloaded: {len(r.content)} bytes | type: {r.headers.get('content-type')}")
     return r.content
 
 
-# ─── Step 2: Transcribe ───────────────────────────────────────────────────────
+# ─── Step 2: Transcribe ✅ FIX: safe_json + raw log ──────────────────────────
 def transcribe_audio(audio_bytes):
     r = requests.post(
         "https://api.sarvam.ai/speech-to-text-translate",
@@ -295,14 +309,27 @@ def transcribe_audio(audio_bytes):
         timeout=60
     )
     if r.status_code != 200:
-        raise Exception(f"Transcription error {r.status_code}: {r.text}")
-    result = r.json()
-    transcript = result.get("transcript", "") or result.get("translated_text", "")
+        raise Exception(f"Sarvam error {r.status_code}: {r.text[:300]}")
+
+    result = safe_json(r, "Sarvam")
+
+    # Try both possible keys Sarvam uses
+    transcript = (
+        result.get("transcript", "")
+        or result.get("translated_text", "")
+        or result.get("text", "")
+        or ""
+    ).strip()
+
+    if not transcript:
+        log.warning(f"Sarvam returned no transcript. Full response keys: {list(result.keys())}")
+        raise Exception("Sarvam returned empty transcript. Check voice note quality or API key.")
+
     log.info(f"Transcript: {transcript}")
     return transcript
 
 
-# ─── Step 3: Extract invoice data ────────────────────────────────────────────
+# ─── Step 3: Extract invoice ✅ FIX: handle empty Claude response ─────────────
 def extract_invoice_data(transcript, seller_info):
     today = datetime.now().strftime("%d/%m/%Y")
     inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -333,8 +360,16 @@ Return ONLY this JSON, no extra text:
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
+
+    # ✅ FIX: guard against empty Claude response
+    if not msg.content or not msg.content[0].text:
+        raise Exception("Claude returned empty response — no content in message.")
+
     text = msg.content[0].text.strip()
     log.info(f"Claude raw: {text[:300]}")
+
+    if not text:
+        raise Exception("Claude returned blank text response.")
 
     # Clean markdown code blocks if present
     if "```json" in text:
@@ -346,37 +381,27 @@ Return ONLY this JSON, no extra text:
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end == 0:
-        raise Exception(f"No JSON found in response: {text[:200]}")
+        raise Exception(f"No JSON found in Claude response: {text[:200]}")
     text = text[start:end]
 
+    if not text.strip():
+        raise Exception("Extracted JSON string is empty after boundary search.")
+
     data = json.loads(text)
-    log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
+    log.info(f"Invoice parsed: {data.get('invoice_type')} for {data.get('customer_name')}")
     return data
 
 
-# ─── Step 4: Generate PDF ─────────────────────────────────────────────────────
-# ✅ v7 CHANGE: env vars now hold versionId (hash) instead of numeric template id
-#    Railway env var names:
-#      CARBONE_TAX_VERSION_ID    → versionId from Tax Invoice template upload
-#      CARBONE_BOS_VERSION_ID    → versionId from Bill of Supply template upload
-#      CARBONE_NONGST_VERSION_ID → versionId from Non-GST Invoice template upload
-#
-#    How to get versionId: Upload your .docx template to Carbone once via:
-#      POST https://api.carbone.io/template
-#    The response gives you both id (numeric) and versionId (hash).
-#    Copy the versionId hash and paste it into the Railway env var.
-#
-#    versioning=true is REQUIRED in the URL when using versionId.
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Step 4: Generate PDF ✅ FIX: safe_json + raw log on Carbone ─────────────
 def generate_pdf(invoice_data):
     t = invoice_data.get("invoice_type", "TAX INVOICE")
 
     if "BILL" in t:
-        version_id = env("CARBONE_BOS_VERSION_ID")       # Bill of Supply versionId
+        version_id = env("CARBONE_BOS_VERSION_ID")
     elif "TAX" in t:
-        version_id = env("CARBONE_TAX_VERSION_ID")        # Tax Invoice versionId
+        version_id = env("CARBONE_TAX_VERSION_ID")
     else:
-        version_id = env("CARBONE_NONGST_VERSION_ID")     # Non-GST Invoice versionId
+        version_id = env("CARBONE_NONGST_VERSION_ID")
 
     if not version_id:
         raise Exception(f"Missing Carbone versionId for invoice type: {t}. Check Railway env vars.")
@@ -393,12 +418,15 @@ def generate_pdf(invoice_data):
         json={"data": invoice_data, "convertTo": "pdf"},
         timeout=60
     )
-    if r.status_code != 200:
-        raise Exception(f"PDF error {r.status_code}: {r.text}")
 
-    rid = r.json().get("data", {}).get("renderId")
+    if r.status_code != 200:
+        raise Exception(f"Carbone render error {r.status_code}: {r.text[:300]}")
+
+    result = safe_json(r, "Carbone-Render")
+
+    rid = result.get("data", {}).get("renderId")
     if not rid:
-        raise Exception(f"No renderId in response: {r.json()}")
+        raise Exception(f"Carbone returned no renderId. Full response: {result}")
 
     pdf_url = f"https://api.carbone.io/render/{rid}"
     log.info(f"PDF ready: {pdf_url}")
@@ -443,7 +471,7 @@ def webhook():
     media_type = request.form.get("MediaContentType0", "")
     media_url  = request.form.get("MediaUrl0", "")
 
-    log.info(f"From: {from_num} | Media: {num_media} | Type: {media_type}")
+    log.info(f"Webhook — From: {from_num} | Media: {num_media} | Type: {media_type}")
 
     try:
         if num_media == 0:
@@ -474,20 +502,18 @@ def webhook():
         seller     = get_seller_info(from_num)
         audio      = download_audio(media_url)
         transcript = transcribe_audio(audio)
-        if not transcript:
-            raise Exception("Could not understand voice note. Please try again.")
         invoice    = extract_invoice_data(transcript, seller)
         pdf_url    = generate_pdf(invoice)
         send_whatsapp(from_num, pdf_url, invoice)
-        log.info("✅ Invoice delivered!")
+        log.info("✅ Invoice delivered successfully!")
         return Response("OK", status=200)
 
     except Exception as e:
-        log.error(f"❌ {e}", exc_info=True)
+        log.error(f"❌ Pipeline error: {e}", exc_info=True)
         try:
             twilio.messages.create(
                 from_=env("TWILIO_FROM_NUMBER"), to=from_num,
-                body=f"❌ Error generating invoice. Please try again.\n\n{str(e)[:120]}"
+                body=f"❌ Error: {str(e)[:200]}"
             )
         except:
             pass
@@ -500,15 +526,15 @@ def health():
     keys = [
         "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
         "SARVAM_API_KEY", "CLAUDE_API_KEY", "CARBONE_API_KEY",
-        "CARBONE_TAX_VERSION_ID",     # ✅ v7: versionId (hash)
-        "CARBONE_BOS_VERSION_ID",     # ✅ v7: versionId (hash)
-        "CARBONE_NONGST_VERSION_ID"   # ✅ v7: versionId (hash)
+        "CARBONE_TAX_VERSION_ID",
+        "CARBONE_BOS_VERSION_ID",
+        "CARBONE_NONGST_VERSION_ID"
     ]
     checks = {k: bool(env(k)) for k in keys}
     all_ok = all(checks.values())
     return {
         "status": "healthy" if all_ok else "missing_config",
-        "version": "v7",
+        "version": "v8",
         "checks": checks,
         "timestamp": datetime.now().isoformat()
     }, 200 if all_ok else 500
@@ -521,5 +547,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v7 starting on port {port}")
+    log.info(f"🚀 GutInvoice v8 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
