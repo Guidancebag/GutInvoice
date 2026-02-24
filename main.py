@@ -1,6 +1,6 @@
 """
 GutInvoice — Every Invoice has a Voice
-v14 — Sequential Invoice Numbers + Credit Note System
+v13 — Sequential Invoice Numbers + Credit Note System
   ✅ All v12 features intact (ReportLab PDFs, Supabase storage)
   ✅ NEW: Sequential invoice numbering — TEJ001-022026 format (per seller per month)
   ✅ NEW: Cancel invoice via voice/text → Credit Note auto-generated + sent on WhatsApp
@@ -1261,7 +1261,7 @@ def health():
     all_ok = all(checks.values())
     return {
         "status":    "healthy" if all_ok else "missing_config",
-        "version":   "v14",
+        "version":   "v13",
         "checks":    checks,
         "timestamp": datetime.now().isoformat()
     }, 200 if all_ok else 500
@@ -1297,7 +1297,7 @@ footer{border-top:1px solid rgba(255,255,255,0.05);padding:40px;text-align:cente
 <body>
 <nav>
   <div><div class="logo">Gut<span>Invoice</span></div><div class="logo-sub">Every Invoice has a Voice</div></div>
-  <div class="live-pill"><span class="live-dot"></span>LIVE v14</div>
+  <div class="live-pill"><span class="live-dot"></span>LIVE v11</div>
 </nav>
 <section class="hero">
   <h1>Your Voice.<br/>Your <em>Invoice.</em></h1>
@@ -1315,5 +1315,5 @@ def home():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v14 starting on port {port}")
+    log.info(f"🚀 GutInvoice v11 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
