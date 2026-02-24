@@ -146,22 +146,25 @@ def get_next_invoice_number(seller_phone: str, seller_name: str, month: int, yea
     """
     Generate next sequential invoice number for this seller in this month/year.
     Format: TEJ001-022026
-      - TEJ  = first 3 alpha chars of seller name (uppercase)
-      - 001  = 3-digit sequence (counts ALL invoices+credit notes this month, skips cancelled seq)
-      - 022026 = MMYYYY
-    Cancelled invoice numbers are NEVER reused — sequence always increments.
     """
+    seller_name = seller_name or "GUT"          # ← guard: never None
     prefix = re.sub(r'[^A-Za-z]', '', seller_name)[:3].upper() or "GUT"
     suffix = f"{month:02d}{year}"
 
-    # Count ALL invoice records for this seller with this prefix+suffix pattern
-    # (includes active, cancelled — ensures gaps are never refilled)
-    pattern = f"{prefix}%-{suffix}"
+    # Count ALL invoice records for this seller in this month/year
+    # (includes active + cancelled — ensures sequence never reuses a number)
+    from calendar import monthrange
+    last_day  = monthrange(year, month)[1]
+    date_from = f"{year}-{month:02d}-01T00:00:00"
+    date_to   = f"{year}-{month:02d}-{last_day:02d}T23:59:59"
+
     r = requests.get(
         sb_url("invoices",
                f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
-               f"&invoice_number=like.{requests.utils.quote(pattern)}"
-               f"&select=invoice_number"),
+               f"&created_at=gte.{date_from}"
+               f"&created_at=lte.{date_to}"
+               f"&invoice_type=neq.CREDIT NOTE"   # don't count credit notes
+               f"&select=invoice_number&limit=500"),
         headers=sb_headers(), timeout=10
     )
     existing = []
@@ -1154,7 +1157,7 @@ def webhook():
                 "Invoice generate అవుతోంది... _(30 seconds లో ready)_"
             )
             now      = datetime.now()
-            inv_no   = get_next_invoice_number(from_num, seller.get("seller_name","GUT"), now.month, now.year)
+            inv_no   = get_next_invoice_number(from_num, seller.get("seller_name") or "GUT", now.month, now.year)
             invoice  = extract_invoice_data(transcript, seller, inv_no)
             pdf_url  = select_and_generate_pdf(invoice, from_num)
             save_invoice(from_num, invoice, pdf_url, transcript)
