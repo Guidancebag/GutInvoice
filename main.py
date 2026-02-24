@@ -185,34 +185,54 @@ def get_next_invoice_number(seller_phone: str, seller_name: str, month: int, yea
 
 # Regex patterns for cancel detection (covers text + voice transcripts)
 CANCEL_PATTERNS = [
-    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{3}-\d{6})',    # cancel TEJ001-022026
-    r'([A-Z]{2,5}\d{3}-\d{6})\s+(?:ని\s+)?cancel',         # TEJ001-022026 cancel / cancel cheyyi
-    r'cancel\s+(?:invoice\s+)?(\d{3}-\d{6})',               # cancel 001-022026 (no prefix)
-    r'(\d{3}-\d{6})\s+cancel',                              # 001-022026 cancel
+    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{3}-\d{6})',   # cancel GUT006-022026
+    r'([A-Z]{2,5}\d{3}-\d{6})\s+cancel',                  # GUT006-022026 cancel
+    r'cancel\s+(?:invoice\s+)?(\d{3}-\d{6})',              # cancel 001-022026
+    r'(\d{3}-\d{6})\s+cancel',                             # 001-022026 cancel
+    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{9})',          # cancel GUT006022026 (no dash)
+    r'([A-Z]{2,5}\d{9})\s+cancel',                        # GUT006022026 cancel (no dash before cancel)
+    r'cancel\s+(?:invoice\s+)?(\d{9})',                    # cancel 006022026 (digits only no dash)
+    r'(\d{9})\s+cancel',                                   # 006022026 cancel
+    r'cancel\s+(?:invoice\s+)?(\d{3})\s*[-/\s]\s*(\d{6})',# cancel 001 - 022026 / cancel 001 022026
 ]
 
 
 def detect_cancel_request(text: str):
     """
     Returns (True, invoice_number_fragment) or (False, None).
-    invoice_number_fragment may be full (TEJ001-022026) or partial (001-022026).
+    Handles: typed text, voice transcripts, Telugu mixed, with/without dash.
     """
-    t = text.upper().strip()
-    for pat in CANCEL_PATTERNS:
-        m = re.search(pat, t)
-        if m:
-            return True, m.group(1)
+    # Check original AND lowercase — do NOT uppercase (patterns need mixed case for prefix)
+    for t in [text, text.lower()]:
+        for pat in CANCEL_PATTERNS:
+            m = re.search(pat, t, re.IGNORECASE)   # ← IGNORECASE fixes the core bug
+            if m:
+                if m.lastindex == 2:
+                    # Pattern with two groups (seq + suffix split)
+                    fragment = f"{m.group(1)}-{m.group(2)}"
+                else:
+                    fragment = m.group(1)
+                # Normalise: if 9 digits with no dash, insert dash after pos 3
+                fragment = fragment.upper()
+                if re.match(r'^[A-Z]{2,5}\d{9}$', fragment):
+                    # e.g. GUT006022026 → GUT006-022026
+                    fragment = fragment[:-6] + "-" + fragment[-6:]
+                elif re.match(r'^\d{9}$', fragment):
+                    # e.g. 006022026 → 006-022026
+                    fragment = fragment[:3] + "-" + fragment[3:]
+                log.info(f"Cancel detected — fragment: {fragment}")
+                return True, fragment
     return False, None
 
 
 def fetch_invoice_by_number(invoice_number_fragment: str, seller_phone: str) -> dict | None:
     """
-    Look up an invoice by full or partial invoice number for this seller.
-    Handles both full (TEJ001-022026) and partial (001-022026) lookups.
+    Look up an active invoice by full or partial invoice number for this seller.
+    Tries: exact match → ends-with match → contains match.
     """
-    fragment = invoice_number_fragment.upper()
+    fragment = invoice_number_fragment.upper().strip()
 
-    # Try exact match first
+    # 1. Exact match (e.g. GUT006-022026)
     r = requests.get(
         sb_url("invoices",
                f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
@@ -220,27 +240,38 @@ def fetch_invoice_by_number(invoice_number_fragment: str, seller_phone: str) -> 
                f"&status=eq.active&limit=1"),
         headers=sb_headers(), timeout=10
     )
-    rows = []
     try:
         rows = safe_json(r, "SB-FetchInvExact")
-    except:
-        pass
-    if rows:
-        return rows[0]
+        if rows: return rows[0]
+    except: pass
 
-    # Try ends-with match (partial like 001-022026)
+    # 2. Ends-with match (e.g. user says 006-022026, actual is GUT006-022026)
     r2 = requests.get(
         sb_url("invoices",
                f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
-               f"&invoice_number=like.{requests.utils.quote('%' + fragment)}"
+               f"&invoice_number=ilike.*{requests.utils.quote(fragment)}"
                f"&status=eq.active&limit=1"),
         headers=sb_headers(), timeout=10
     )
     try:
         rows2 = safe_json(r2, "SB-FetchInvPartial")
-        return rows2[0] if rows2 else None
-    except:
-        return None
+        if rows2: return rows2[0]
+    except: pass
+
+    # 3. Contains match (fallback)
+    r3 = requests.get(
+        sb_url("invoices",
+               f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
+               f"&invoice_number=ilike.*{requests.utils.quote(fragment)}*"
+               f"&status=eq.active&limit=1"),
+        headers=sb_headers(), timeout=10
+    )
+    try:
+        rows3 = safe_json(r3, "SB-FetchInvContains")
+        if rows3: return rows3[0]
+    except: pass
+
+    return None
 
 
 def cancel_invoice_in_db(invoice_number: str, seller_phone: str) -> bool:
