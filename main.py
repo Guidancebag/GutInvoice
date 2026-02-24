@@ -1,933 +1,1435 @@
 """
 GutInvoice — Every Invoice has a Voice
-v11 — Monthly Invoice & Tax Liability Report
-  ✅ All v10 features intact (onboarding, Supabase, invoice pipeline)
-  ✅ NEW: Monthly report triggered by text or voice
-  ✅ NEW: Supabase query fetches all invoices for seller + month
-  ✅ NEW: Python aggregates by type (TAX/BOS/NONGST) and HSN
-  ✅ NEW: Carbone report template renders professional PDF
-  ✅ NEW: PDF sent back to WhatsApp automatically
-  ✅ Telugu + English triggers both supported
+v16 — Template-Exact PDFs | Sequential Invoice Numbers | Cancel/Credit Note Flow
+==================================================================================
+SINGLE FILE DEPLOYMENT — no pdf_generators.py needed.
 
-New ENV var needed in Railway:
-    CARBONE_REPORT_VERSION_ID = <versionId from Carbone after uploading report template>
+KEY CHANGES FROM v15:
+  ✅ All 5 PDF templates rebuilt to match approved layouts exactly
+  ✅ ₹ symbol used throughout (not Rs.)
+  ✅ Sequential invoice numbers: {PREFIX}{SEQ:03d}-{MM}{YYYY} e.g. TEJ001-022026
+  ✅ Invoice numbers never reused (cancelled invoices keep their number voided)
+  ✅ Cancel command: "cancel TEJ001-022026" → auto credit note → sent to WhatsApp
+  ✅ Monthly report: 5 sections (A: Tax, B: BOS, C: NonGST, D: HSN, E: Credit Notes)
+  ✅ Monthly report includes FINAL TAX LIABILITY SUMMARY with credit note deductions
 
-Trigger phrases (text or voice):
-    "Send January 2026 summary"
-    "January report"
-    "జనవరి 2026 invoices summary"
-    "Last month summary"
-    "February invoices"
+ENV VARS REQUIRED (Railway → Variables):
+  TWILIO_ACCOUNT_SID
+  TWILIO_AUTH_TOKEN
+  TWILIO_FROM_NUMBER   (e.g. whatsapp:+14155238886)
+  SARVAM_API_KEY
+  CLAUDE_API_KEY       (or ANTHROPIC_API_KEY)
+  SUPABASE_URL         (e.g. https://xxxx.supabase.co)
+  SUPABASE_KEY         (service_role key)
+
+SUPABASE SQL (run once in SQL editor if upgrading from older version):
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS is_cancelled BOOLEAN DEFAULT FALSE;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS credit_note_for TEXT;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS taxable_value NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cgst NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sgst NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS igst NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cgst_rate NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sgst_rate NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS igst_rate NUMERIC DEFAULT 0;
+  ALTER TABLE invoices ADD COLUMN IF NOT EXISTS invoice_date TEXT;
 """
 
-import os
-import re
-import json
-import requests
-import anthropic
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+import os, io, json, logging, re, requests
+from datetime import datetime
 from flask import Flask, request, Response, render_template_string
 from twilio.rest import Client as TwilioClient
-from datetime import datetime
-from collections import defaultdict
-import logging
+import anthropic
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 app = Flask(__name__)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# BASIC HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+def env(key, default=""):
+    return os.environ.get(key, default)
+
 def get_twilio():
-    return TwilioClient(os.environ.get("TWILIO_ACCOUNT_SID"), os.environ.get("TWILIO_AUTH_TOKEN"))
+    return TwilioClient(env("TWILIO_ACCOUNT_SID"), env("TWILIO_AUTH_TOKEN"))
 
 def get_claude():
-    return anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY"))
+    api_key = env("CLAUDE_API_KEY") or env("ANTHROPIC_API_KEY")
+    return anthropic.Anthropic(api_key=api_key)
 
-def env(key):
-    return os.environ.get(key, "")
-
-
-# ─── Safe JSON — identical to v9/v10 ─────────────────────────────────────────
 def safe_json(response, label):
     raw = response.text.strip()
-    log.info(f"[{label}] HTTP {response.status_code} | raw: {raw[:300]}")
+    log.info(f"[{label}] HTTP {response.status_code} | {raw[:200]}")
     if not raw:
-        raise Exception(f"{label} returned empty response body (HTTP {response.status_code})")
+        raise Exception(f"{label} empty response (HTTP {response.status_code})")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
-        raise Exception(f"{label} returned non-JSON (HTTP {response.status_code}): {raw[:200]} | {e}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SUPABASE HELPERS — identical to v10
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def sb_headers():
-    return {
-        "apikey": env("SUPABASE_KEY"),
-        "Authorization": f"Bearer {env('SUPABASE_KEY')}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-def sb_url(table, query=""):
-    return f"{env('SUPABASE_URL')}/rest/v1/{table}{query}"
-
-
-def get_seller(phone):
-    r = requests.get(
-        sb_url("sellers", f"?phone_number=eq.{requests.utils.quote(phone)}&limit=1"),
-        headers=sb_headers(), timeout=10
-    )
-    rows = safe_json(r, "SB-GetSeller")
-    return rows[0] if rows else None
-
-
-def create_seller(phone):
-    r = requests.post(
-        sb_url("sellers"),
-        headers=sb_headers(),
-        json={"phone_number": phone, "onboarding_step": "new"},
-        timeout=10
-    )
-    rows = safe_json(r, "SB-CreateSeller")
-    log.info(f"New seller created: {phone}")
-    return rows[0] if rows else {}
-
-
-def update_seller(phone, fields: dict):
-    r = requests.patch(
-        sb_url("sellers", f"?phone_number=eq.{requests.utils.quote(phone)}"),
-        headers=sb_headers(),
-        json=fields,
-        timeout=10
-    )
-    rows = safe_json(r, "SB-UpdateSeller")
-    return rows[0] if rows else {}
-
-
-def get_or_create_seller(phone):
-    seller = get_seller(phone)
-    if not seller:
-        seller = create_seller(phone)
-    return seller
-
-
-def save_invoice(seller_phone, invoice_data, pdf_url, transcript):
-    row = {
-        "seller_phone":     seller_phone,
-        "invoice_number":   invoice_data.get("invoice_number", ""),
-        "invoice_type":     invoice_data.get("invoice_type", ""),
-        "customer_name":    invoice_data.get("customer_name", ""),
-        "customer_address": invoice_data.get("customer_address", ""),
-        "customer_gstin":   invoice_data.get("customer_gstin", ""),
-        "taxable_value":    float(invoice_data.get("taxable_value", 0)),
-        "cgst_amount":      float(invoice_data.get("cgst_amount", 0)),
-        "sgst_amount":      float(invoice_data.get("sgst_amount", 0)),
-        "igst_amount":      float(invoice_data.get("igst_amount", 0)),
-        "total_amount":     float(invoice_data.get("total_amount", 0)),
-        "invoice_data":     invoice_data,
-        "pdf_url":          pdf_url,
-        "transcript":       transcript,
-        "status":           "generated"
-    }
-    r = requests.post(sb_url("invoices"), headers=sb_headers(), json=row, timeout=10)
-    rows = safe_json(r, "SB-SaveInvoice")
-    log.info(f"Invoice saved: {invoice_data.get('invoice_number')} for {seller_phone}")
-    return rows[0] if rows else {}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 1: DETECT REPORT REQUEST
-# ═══════════════════════════════════════════════════════════════════════════════
-
-MONTH_MAP = {
-    # English
-    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
-    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
-    # Telugu transliterated
-    "januvari":1,"phivruvari":2,"march":3,"epril":4,"me":5,"jun":6,
-    "juli":7,"agastu":8,"september":9,"aktobar":10,"november":11,"disambar":12,
-    # Short
-    "jan":1,"feb":2,"mar":3,"apr":4,"jun":6,"jul":7,
-    "aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
-}
-
-REPORT_KEYWORDS = [
-    "summary", "report", "statement", "invoices summary",
-    "tax report", "monthly report", "month report",
-    "all invoices", "invoice list", "month summary",
-    # Telugu
-    "summary పంపు", "report పంపు", "నెల report", "నెల summary",
-    "invoices పంపు", "అన్ని invoices",
-]
-
-def is_report_request(text):
-    """
-    Returns (True, month_num, year) if text is a report request.
-    Returns (False, None, None) otherwise.
-    """
-    t = text.lower().strip()
-
-    # Must contain at least one report keyword
-    has_keyword = any(kw in t for kw in REPORT_KEYWORDS)
-
-    # Try to find month
-    month_num = None
-    for m_name, m_num in MONTH_MAP.items():
-        if m_name in t:
-            month_num = m_num
-            break
-
-    # Try to find year (4-digit or 2-digit)
-    year_match = re.search(r"\b(20\d{2})\b", t)
-    year = int(year_match.group(1)) if year_match else datetime.now().year
-
-    # "last month" handling
-    if "last month" in t or "previous month" in t or "గత నెల" in t:
-        now = datetime.now()
-        month_num = now.month - 1 if now.month > 1 else 12
-        year      = now.year if now.month > 1 else now.year - 1
-        has_keyword = True
-
-    # "this month" handling
-    if "this month" in t or "ఈ నెల" in t:
-        month_num = datetime.now().month
-        year      = datetime.now().year
-        has_keyword = True
-
-    if has_keyword and month_num:
-        return True, month_num, year
-
-    return False, None, None
-
-
-def detect_report_from_voice(transcript):
-    """
-    Use Claude to detect if a voice transcript is asking for a monthly report.
-    Returns (is_report, month_num, year) or (False, None, None).
-    """
-    prompt = f"""Analyze this transcript from an Indian business owner using WhatsApp.
-Are they asking for a monthly invoice summary/report?
-
-Transcript: "{transcript}"
-
-If YES, extract the month number (1-12) and year they want.
-Return ONLY valid JSON:
-{{"is_report": true, "month": 1, "year": 2026}}
-or
-{{"is_report": false, "month": null, "year": null}}
-
-Note: They may speak in Telugu, English, or mixed. 
-"January report", "January 2026 invoices", "జనవరి summary పంపు" etc. all count as YES."""
-
-    try:
-        claude = get_claude()
-        msg = claude.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=100,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = msg.content[0].text.strip()
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        start = text.find("{")
-        end   = text.rfind("}") + 1
-        data  = json.loads(text[start:end])
-        if data.get("is_report") and data.get("month"):
-            return True, int(data["month"]), int(data.get("year", datetime.now().year))
-    except Exception as e:
-        log.warning(f"Report detection from voice failed: {e}")
-
-    return False, None, None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 2: FETCH FROM SUPABASE
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def fetch_monthly_invoices(seller_phone, month_num, year):
-    """
-    Fetch all invoices for a seller in a given month/year from Supabase.
-    Returns list of invoice dicts.
-    """
-    # Date range for the month
-    from calendar import monthrange
-    last_day = monthrange(year, month_num)[1]
-    date_from = f"{year}-{month_num:02d}-01T00:00:00"
-    date_to   = f"{year}-{month_num:02d}-{last_day:02d}T23:59:59"
-
-    query = (
-        f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
-        f"&created_at=gte.{date_from}"
-        f"&created_at=lte.{date_to}"
-        f"&order=created_at.asc"
-        f"&limit=500"
-    )
-    r = requests.get(sb_url("invoices", query), headers=sb_headers(), timeout=15)
-    invoices = safe_json(r, "SB-FetchMonthly")
-    log.info(f"Fetched {len(invoices)} invoices for {seller_phone} in {month_num}/{year}")
-    return invoices
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 3: AGGREGATE DATA
-# ═══════════════════════════════════════════════════════════════════════════════
-
-MONTH_NAMES = ["","January","February","March","April","May","June",
-               "July","August","September","October","November","December"]
+        raise Exception(f"{label} non-JSON (HTTP {response.status_code}): {raw[:200]} | {e}")
 
 def fmt(val):
-    """Format number as Indian currency string."""
     try:
         return f"{float(val):,.2f}"
-    except:
+    except Exception:
         return "0.00"
 
-def aggregate_report_data(invoices, seller, month_num, year):
-    """
-    Aggregate invoice list into Carbone-ready data dict.
-    Splits into TAX / BOS / NONGST sections + HSN summary.
-    """
-    tax_rows   = []
-    bos_rows   = []
-    nongst_rows = []
-
-    # HSN accumulator: {hsn_code: {desc, taxable, cgst, sgst, igst}}
-    hsn_acc = defaultdict(lambda: {
-        "description": "", "taxable_value": 0.0,
-        "cgst": 0.0, "sgst": 0.0, "igst": 0.0
-    })
-
-    def get_items_desc(inv_data):
-        """Extract first item description from invoice_data JSON."""
-        items = inv_data.get("items", [])
-        if items:
-            descs = [it.get("description","") for it in items if it.get("description")]
-            return ", ".join(descs[:2]) or "—"
-        return "—"
-
-    def get_hsn(inv_data):
-        items = inv_data.get("items", [])
-        if items:
-            hsns = [str(it.get("hsn_sac","")) for it in items if it.get("hsn_sac")]
-            return ", ".join(hsns[:2]) or "—"
-        return "—"
-
-    for inv in invoices:
-        raw = inv.get("invoice_data") or {}
-        inv_type = (inv.get("invoice_type") or "").upper()
-
-        row = {
-            "invoice_number": inv.get("invoice_number", ""),
-            "invoice_date":   (inv.get("created_at") or "")[:10],
-            "customer_name":  inv.get("customer_name") or "—",
-            "description":    get_items_desc(raw),
-            "taxable_value":  fmt(inv.get("taxable_value", 0)),
-            "cgst_amount":    fmt(inv.get("cgst_amount", 0)),
-            "sgst_amount":    fmt(inv.get("sgst_amount", 0)),
-            "igst_amount":    fmt(inv.get("igst_amount", 0)),
-            "hsn":            get_hsn(raw),
-        }
-
-        # HSN accumulation
-        hsn_key = get_hsn(raw) or "MISC"
-        hsn_acc[hsn_key]["description"] = get_items_desc(raw)
-        hsn_acc[hsn_key]["taxable_value"] += float(inv.get("taxable_value", 0))
-        hsn_acc[hsn_key]["cgst"]          += float(inv.get("cgst_amount", 0))
-        hsn_acc[hsn_key]["sgst"]          += float(inv.get("sgst_amount", 0))
-        hsn_acc[hsn_key]["igst"]          += float(inv.get("igst_amount", 0))
-
-        if "BILL" in inv_type or "SUPPLY" in inv_type:
-            bos_rows.append(row)
-        elif "TAX" in inv_type:
-            tax_rows.append(row)
-        else:
-            nongst_rows.append(row)
-
-    def section_total(rows, key):
-        return sum(
-            float(str(r.get(key,"0")).replace(",","")) for r in rows
-        )
-
-    def make_total(rows):
-        return {
-            "count":         len(rows),
-            "taxable_value": fmt(section_total(rows, "taxable_value")),
-            "cgst":          fmt(section_total(rows, "cgst_amount")),
-            "sgst":          fmt(section_total(rows, "sgst_amount")),
-            "igst":          fmt(section_total(rows, "igst_amount")),
-        }
-
-    # HSN summary rows
-    hsn_rows = []
-    for code, acc in hsn_acc.items():
-        total_tax = acc["cgst"] + acc["sgst"] + acc["igst"]
-        hsn_rows.append({
-            "hsn_code":     code,
-            "description":  acc["description"],
-            "taxable_value":fmt(acc["taxable_value"]),
-            "cgst":         fmt(acc["cgst"]),
-            "sgst":         fmt(acc["sgst"]),
-            "igst":         fmt(acc["igst"]),
-            "total_tax":    fmt(total_tax),
-        })
-
-    # Grand totals
-    all_taxable = sum(float(inv.get("taxable_value",0)) for inv in invoices)
-    all_cgst    = sum(float(inv.get("cgst_amount",0)) for inv in invoices)
-    all_sgst    = sum(float(inv.get("sgst_amount",0)) for inv in invoices)
-    all_igst    = sum(float(inv.get("igst_amount",0)) for inv in invoices)
-    all_gst     = all_cgst + all_sgst + all_igst
-
-    return {
-        # Header
-        "seller_name":    seller.get("seller_name") or "My Business",
-        "seller_address": seller.get("seller_address") or "Hyderabad, Telangana",
-        "seller_gstin":   seller.get("seller_gstin") or "Not Registered",
-        "report_month":   MONTH_NAMES[month_num],
-        "report_year":    str(year),
-        "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "total_count":    len(invoices),
-
-        # Section 1 — Tax Invoices
-        "tax_invoices":       tax_rows if tax_rows else [{"invoice_number":"No tax invoices","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
-        "tax_invoices_total": make_total(tax_rows),
-
-        # Section 2 — Bill of Supply
-        "bos_invoices": bos_rows if bos_rows else [{"invoice_number":"No bill of supply","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
-        "bos_total":    make_total(bos_rows),
-
-        # Section 3 — Non-GST
-        "nongst_invoices": nongst_rows if nongst_rows else [{"invoice_number":"No non-GST invoices","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
-        "nongst_total":    make_total(nongst_rows),
-
-        # Section 4 — HSN Summary
-        "hsn_summary": hsn_rows if hsn_rows else [{"hsn_code":"—","description":"No data","taxable_value":"0.00","cgst":"0.00","sgst":"0.00","igst":"0.00","total_tax":"0.00"}],
-        "hsn_grand_total": {
-            "taxable_value": fmt(sum(float(str(r["taxable_value"]).replace(",","")) for r in hsn_rows)),
-            "cgst":  fmt(sum(float(str(r["cgst"]).replace(",","")) for r in hsn_rows)),
-            "sgst":  fmt(sum(float(str(r["sgst"]).replace(",","")) for r in hsn_rows)),
-            "igst":  fmt(sum(float(str(r["igst"]).replace(",","")) for r in hsn_rows)),
-            "total_tax": fmt(sum(float(str(r["total_tax"]).replace(",","")) for r in hsn_rows)),
-        },
-
-        # Section 5 — Summary
-        "summary": {
-            "total_taxable_value": fmt(all_taxable),
-            "total_cgst":          fmt(all_cgst),
-            "total_sgst":          fmt(all_sgst),
-            "total_igst":          fmt(all_igst),
-            "total_gst_payable":   fmt(all_gst),
-        },
-    }
-
+def fmt_i(val):
+    try:
+        v = float(val)
+        return str(int(v)) if v == int(v) else str(v)
+    except Exception:
+        return "0"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 4: RENDER PDF VIA CARBONE
+# PDF STYLES & CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_report_pdf(report_data):
-    """Render the monthly report template via Carbone. Same pattern as invoice PDF."""
-    version_id = env("CARBONE_REPORT_VERSION_ID")
-    if not version_id:
-        raise Exception("CARBONE_REPORT_VERSION_ID not set in Railway env vars.")
+M      = 15 * mm
+PAGE_W = A4[0] - 2 * M
+TEAL   = colors.HexColor("#006B6B")
+ORANGE = colors.HexColor("#FF6B35")
+DARK   = colors.HexColor("#1A1A2E")
+LGRAY  = colors.HexColor("#F5F5F5")
+RED    = colors.HexColor("#CC0000")
+WHITE  = colors.white
+SS     = getSampleStyleSheet()
 
-    log.info(f"Carbone Report versionId: {version_id[:16]}...")
+def _s(name, **kw):
+    return ParagraphStyle(name=name, parent=SS["Normal"], **kw)
 
-    r = requests.post(
-        f"https://api.carbone.io/render/{version_id}?versioning=true",
-        headers={
-            "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
-            "Content-Type":  "application/json",
-            "carbone-version": "5"
-        },
-        json={"data": report_data, "convertTo": "pdf"},
-        timeout=90
+ST = {
+    "doc_title": _s("doc_title", fontSize=15, fontName="Helvetica-Bold",
+                    textColor=WHITE, alignment=TA_CENTER),
+    "sec_hdr":   _s("sec_hdr",  fontSize=8,  fontName="Helvetica-Bold",
+                    textColor=WHITE, alignment=TA_CENTER),
+    "body":      _s("body",     fontSize=8,  textColor=DARK, leading=12),
+    "body_b":    _s("body_b",   fontSize=8,  fontName="Helvetica-Bold", textColor=DARK),
+    "body_r":    _s("body_r",   fontSize=8,  textColor=DARK, alignment=TA_RIGHT, leading=12),
+    "grand_l":   _s("grand_l",  fontSize=9,  fontName="Helvetica-Bold", textColor=DARK),
+    "grand_r":   _s("grand_r",  fontSize=9,  fontName="Helvetica-Bold", textColor=DARK,
+                    alignment=TA_RIGHT),
+    "th":        _s("th",       fontSize=8,  fontName="Helvetica-Bold",
+                    textColor=WHITE, alignment=TA_CENTER),
+    "td_c":      _s("td_c",     fontSize=8,  textColor=DARK, alignment=TA_CENTER, leading=11),
+    "td_l":      _s("td_l",     fontSize=8,  textColor=DARK, alignment=TA_LEFT,   leading=11),
+    "td_r":      _s("td_r",     fontSize=8,  textColor=DARK, alignment=TA_RIGHT,  leading=11),
+    "fn1":       _s("fn1",      fontSize=7,  textColor=WHITE, alignment=TA_CENTER, leading=10),
+    "fn2":       _s("fn2",      fontSize=6,  textColor=ORANGE, alignment=TA_CENTER,
+                    leading=9, fontName="Helvetica-Oblique"),
+    "red_b":     _s("red_b",    fontSize=8,  fontName="Helvetica-Bold", textColor=RED),
+    "red_r":     _s("red_r",    fontSize=8,  fontName="Helvetica-Bold", textColor=RED,
+                    alignment=TA_RIGHT),
+    "small_c":   _s("small_c",  fontSize=7,  textColor=colors.grey,
+                    alignment=TA_CENTER, leading=9),
+}
+
+def p(text, style="body"):
+    return Paragraph(str(text) if text is not None else "", ST[style])
+
+def sp(h=4):
+    return Spacer(1, h * mm)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PDF SHARED COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def doc_header(title):
+    """Full-width teal header — centered bold title"""
+    t = Table([[p(title, "doc_title")]], colWidths=[PAGE_W], rowHeights=[11 * mm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), TEAL),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+def _inner_box(rows, width):
+    t = Table(rows, colWidths=[width])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0), TEAL),
+        ("BACKGROUND",    (0, 1), (-1, -1), LGRAY),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("INNERGRID",     (0, 1), (-1, -1), 0.2, colors.lightgrey),
+    ]))
+    return t
+
+def seller_invoice_section(d, show_gstin=True, show_reverse=True,
+                            right_lbl="INVOICE DETAILS", no_lbl="Invoice No"):
+    """
+    Two-column block matching all docx templates:
+    Left  = SELLER DETAILS
+    Right = INVOICE DETAILS (or CREDIT NOTE DETAILS)
+    """
+    LW = PAGE_W * 0.52
+    RW = PAGE_W * 0.48
+
+    left_rows = [
+        [p("SELLER DETAILS", "sec_hdr")],
+        [p(f"<b>Business Name:</b> {d.get('seller_name','')}", "body")],
+        [p(f"<b>Address:</b> {d.get('seller_address','')}", "body")],
+    ]
+    if show_gstin:
+        left_rows.append([p(f"<b>GSTIN:</b> {d.get('seller_gstin','')}", "body")])
+
+    inv_date_lbl = "Credit Note Date" if "CREDIT" in right_lbl.upper() else "Invoice Date"
+    right_rows = [
+        [p(right_lbl, "sec_hdr")],
+        [p(f"<b>{no_lbl}:</b> {d.get('invoice_number','')}", "body")],
+        [p(f"<b>{inv_date_lbl}:</b> {d.get('invoice_date', datetime.now().strftime('%d/%m/%Y'))}", "body")],
+        [p(f"<b>Place of Supply:</b> {d.get('place_of_supply','')}", "body")],
+    ]
+    if show_reverse:
+        right_rows.append([p(f"<b>Reverse Charge:</b> {d.get('reverse_charge','No')}", "body")])
+
+    outer = Table(
+        [[_inner_box(left_rows, LW - 3), _inner_box(right_rows, RW - 3)]],
+        colWidths=[LW, RW]
     )
+    outer.setStyle(TableStyle([
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+        ("TOPPADDING",    (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return outer
 
-    if r.status_code != 200:
-        raise Exception(f"Carbone report error {r.status_code}: {r.text[:300]}")
+def bill_to_section(d, show_gstin=True):
+    """Full-width BILL TO box"""
+    rows = [
+        [p("BILL TO (CUSTOMER DETAILS)", "sec_hdr")],
+        [p(f"<b>Name:</b> {d.get('customer_name','')}", "body")],
+        [p(f"<b>Address:</b> {d.get('customer_address','')}", "body")],
+    ]
+    if show_gstin and d.get("customer_gstin"):
+        rows.append([p(f"<b>GSTIN:</b> {d.get('customer_gstin','')}", "body")])
+    t = Table(rows, colWidths=[PAGE_W])
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0), TEAL),
+        ("BACKGROUND",    (0, 1), (-1, -1), LGRAY),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("INNERGRID",     (0, 1), (-1, -1), 0.2, colors.lightgrey),
+    ]))
+    return t
 
-    result = safe_json(r, "Carbone-Report")
-    rid = result.get("data", {}).get("renderId")
-    if not rid:
-        raise Exception(f"Carbone returned no renderId for report: {result}")
+def items_table_7col(items):
+    """
+    7-column items table matching all 3 docx templates:
+    # | Description | HSN/SAC | Qty | Unit | Rate (₹) | Amount (₹)
+    """
+    CW = [PAGE_W * w for w in [0.05, 0.33, 0.12, 0.08, 0.08, 0.16, 0.18]]
+    data = [[p("#","th"), p("Description","th"), p("HSN/SAC","th"),
+             p("Qty","th"), p("Unit","th"), p("Rate (₹)","th"), p("Amount (₹)","th")]]
+    for it in items:
+        data.append([
+            p(str(it.get("sno","1")),          "td_c"),
+            p(str(it.get("description","")),    "td_l"),
+            p(str(it.get("hsn_sac","")),        "td_c"),
+            p(fmt(it.get("qty", 0)),             "td_r"),
+            p(str(it.get("unit","Nos")),         "td_c"),
+            p(f"₹ {fmt(it.get('rate',0))}",      "td_r"),
+            p(f"₹ {fmt(it.get('amount',0))}",    "td_r"),
+        ])
+    t = Table(data, colWidths=CW, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0), TEAL),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [WHITE, LGRAY]),
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.3, colors.lightgrey),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return t
 
-    pdf_url = f"https://api.carbone.io/render/{rid}"
-    log.info(f"Report PDF ready: {pdf_url}")
-    return pdf_url
+def totals_box(rows):
+    """Right-aligned totals block with grand total highlighted"""
+    t = Table(rows, colWidths=[PAGE_W * 0.70, PAGE_W * 0.30])
+    t.setStyle(TableStyle([
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 5),
+        ("ALIGN",         (1, 0), (1, -1), "RIGHT"),
+        ("LINEABOVE",     (0, -1), (-1, -1), 1.2, TEAL),
+        ("LINEBELOW",     (0, -1), (-1, -1), 1.5, TEAL),
+        ("BACKGROUND",    (0, -1), (-1, -1), LGRAY),
+    ]))
+    return t
 
+def declaration_two_col(declaration, payment_terms):
+    """Two-column DECLARATION | PAYMENT TERMS — used in Tax Invoice"""
+    t = Table(
+        [[p("<b>DECLARATION</b>", "body_b"), p("<b>PAYMENT TERMS</b>", "body_b")],
+         [p(declaration, "body"),            p(payment_terms, "body")]],
+        colWidths=[PAGE_W * 0.60, PAGE_W * 0.40]
+    )
+    t.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("BACKGROUND",    (0, 0), (-1, 0), LGRAY),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.3, colors.lightgrey),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+    ]))
+    return t
+
+def declaration_single(title, declaration, payment_terms):
+    """Single-box declaration — used in Bill of Supply and Non-GST Invoice"""
+    t = Table(
+        [[p(title, "body_b")],
+         [p(declaration, "body")],
+         [p(f"<b>Payment Terms:</b> {payment_terms}", "body")]],
+        colWidths=[PAGE_W]
+    )
+    t.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("BACKGROUND",    (0, 0), (-1, 0), LGRAY),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+    ]))
+    return t
+
+def signatory_block(seller_name):
+    """For {seller} / Authorised Signatory — right aligned"""
+    t1 = Table(
+        [[p(""), p(f"<b>For {seller_name}</b>", "body")]],
+        colWidths=[PAGE_W * 0.55, PAGE_W * 0.45]
+    )
+    t1.setStyle(TableStyle([
+        ("TOPPADDING",    (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("ALIGN",         (1, 0), (1, 0), "RIGHT"),
+    ]))
+    t2 = Table(
+        [[p(""), p("Authorised Signatory", "body")]],
+        colWidths=[PAGE_W * 0.55, PAGE_W * 0.45]
+    )
+    t2.setStyle(TableStyle([
+        ("TOPPADDING",    (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN",         (1, 0), (1, 0), "RIGHT"),
+        ("LINEABOVE",     (1, 0), (1, 0), 0.5, colors.lightgrey),
+    ]))
+    return [t1, t2]
+
+def footer_elems():
+    t = Table(
+        [[p("Powered by GutInvoice, Every Invoice has a voice !!", "fn1")],
+         [p("Developed by Tallbag Advisory and Tech Solutions Private Limited  |  Contact: +91 7702424946", "fn1")],
+         [p("Disclaimer: Double check the Invoice details generated before sharing to anyone. GutInvoice is not responsible for any errors.", "fn2")]],
+        colWidths=[PAGE_W]
+    )
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (0, 1), TEAL),
+        ("BACKGROUND",    (0, 2), (0, 2), colors.HexColor("#FFF3EE")),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("BOX",           (0, 2), (-1, 2), 0.3, ORANGE),
+    ]))
+    return [sp(5), t]
+
+def num_words(amount):
+    ones = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine",
+            "Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen",
+            "Seventeen","Eighteen","Nineteen"]
+    tens = ["","","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"]
+    def _w(n):
+        if n < 20:    return ones[n]
+        elif n < 100: return tens[n//10] + (" " + ones[n%10] if n%10 else "")
+        elif n < 1000:  return ones[n//100]+" Hundred"+(" and "+_w(n%100) if n%100 else "")
+        elif n < 100000: return _w(n//1000)+" Thousand"+(" "+_w(n%1000) if n%1000 else "")
+        elif n < 10000000: return _w(n//100000)+" Lakh"+(" "+_w(n%100000) if n%100000 else "")
+        else: return _w(n//10000000)+" Crore"+(" "+_w(n%10000000) if n%10000000 else "")
+    try:
+        n = int(float(amount))
+        return "Zero Rupees Only" if n==0 else _w(n)+" Rupees Only"
+    except Exception:
+        return ""
+
+def _new_doc(buf):
+    return SimpleDocTemplate(buf, pagesize=A4,
+                             leftMargin=M, rightMargin=M,
+                             topMargin=M, bottomMargin=M)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 5: SEND REPORT VIA WHATSAPP
+# BUILDER 1: TAX INVOICE  (matches 438394e... docx template)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def send_report_whatsapp(twilio, to, pdf_url, report_data, lang="english"):
-    month = report_data.get("report_month","")
-    year  = report_data.get("report_year","")
-    count = report_data.get("total_count", 0)
-    tv    = report_data.get("summary",{}).get("total_taxable_value","0.00")
-    gst   = report_data.get("summary",{}).get("total_gst_payable","0.00")
+def build_tax_invoice(d: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = _new_doc(buf)
+    el  = []
 
-    if lang == "telugu":
-        body = (
-            f"📊 *{month} {year} Invoice Report Ready!*\n\n"
-            f"📄 Total Invoices: {count}\n"
-            f"💰 Total Taxable Value: ₹{tv}\n"
-            f"🏛️ GST Payable: ₹{gst}\n\n"
-            f"_GutInvoice 🎙️ — మీ గొంతే మీ Invoice_"
-        )
+    el.append(doc_header("TAX INVOICE"))
+    el.append(sp(2))
+    el.append(seller_invoice_section(d, show_gstin=True, show_reverse=True))
+    el.append(sp(2))
+    el.append(bill_to_section(d, show_gstin=True))
+    el.append(sp(3))
+    el.append(items_table_7col(d.get("items", [])))
+    el.append(sp(2))
+
+    cr  = float(d.get("cgst_rate", 0))
+    sr  = float(d.get("sgst_rate", 0))
+    ir  = float(d.get("igst_rate", 0))
+    inter = str(d.get("is_interstate","false")).lower() == "true"
+    tr = [[p("Taxable Value","body"), p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")]]
+    if inter:
+        tr.append([p(f"IGST @ {fmt_i(ir)}%","body"), p(f"₹ {fmt(d.get('igst',0))}","body_r")])
     else:
-        body = (
-            f"📊 *{month} {year} Invoice & Tax Report*\n\n"
-            f"📄 Total Invoices: {count}\n"
-            f"💰 Total Taxable Value: ₹{tv}\n"
-            f"🏛️ GST Payable to Govt: ₹{gst}\n\n"
-            f"_Powered by GutInvoice 🎙️ — Every Invoice has a Voice_"
-        )
+        tr.append([p(f"CGST @ {fmt_i(cr)}%","body"), p(f"₹ {fmt(d.get('cgst',0))}","body_r")])
+        tr.append([p(f"SGST @ {fmt_i(sr)}%","body"), p(f"₹ {fmt(d.get('sgst',0))}","body_r")])
+    tr.append([p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")])
+    el.append(totals_box(tr))
+    el.append(sp(2))
+    el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
+    el.append(sp(3))
+    el.append(declaration_two_col(
+        d.get("declaration","We declare that this invoice shows the actual price of the goods/services described and all particulars are true and correct."),
+        d.get("payment_terms","Pay within 30 days")
+    ))
+    el.append(sp(2))
+    el.extend(signatory_block(d.get("seller_name","")))
+    el.extend(footer_elems())
+    doc.build(el)
+    return buf.getvalue()
 
-    msg = twilio.messages.create(
-        from_=env("TWILIO_FROM_NUMBER"),
-        to=to,
-        body=body,
-        media_url=[pdf_url]
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUILDER 2: BILL OF SUPPLY  (matches 84a93a7... docx template)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_bill_of_supply(d: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = _new_doc(buf)
+    el  = []
+
+    el.append(doc_header("BILL OF SUPPLY"))
+    el.append(sp(2))
+    el.append(seller_invoice_section(d, show_gstin=True, show_reverse=True))
+    el.append(sp(2))
+    el.append(bill_to_section(d, show_gstin=False))   # No GSTIN for BOS customer
+    el.append(sp(3))
+    el.append(items_table_7col(d.get("items", [])))
+    el.append(sp(2))
+    tr = [
+        [p("Sub Total","body"),    p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+    ]
+    el.append(totals_box(tr))
+    el.append(sp(2))
+    el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
+    el.append(sp(3))
+    el.append(declaration_single(
+        "DECLARATION (MANDATORY FOR COMPOSITION DEALERS)",
+        d.get("declaration","Composition taxable person, not eligible to collect tax on supplies."),
+        d.get("payment_terms","Pay within 15 days")
+    ))
+    el.append(sp(2))
+    el.extend(signatory_block(d.get("seller_name","")))
+    el.extend(footer_elems())
+    doc.build(el)
+    return buf.getvalue()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUILDER 3: INVOICE (Non-GST)  (matches 94ecfd8... docx template)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_nongst_invoice(d: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = _new_doc(buf)
+    el  = []
+
+    el.append(doc_header("INVOICE"))
+    el.append(sp(2))
+    el.append(seller_invoice_section(d, show_gstin=False, show_reverse=False))  # No GSTIN/RC
+    el.append(sp(2))
+    el.append(bill_to_section(d, show_gstin=False))
+    el.append(sp(3))
+    el.append(items_table_7col(d.get("items", [])))
+    el.append(sp(2))
+    tr = [
+        [p("Sub Total","body"),       p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("TOTAL AMOUNT","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+    ]
+    el.append(totals_box(tr))
+    el.append(sp(2))
+    el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
+    el.append(sp(3))
+    el.append(declaration_single(
+        "DECLARATION",
+        d.get("declaration","This is not a tax invoice. No GST has been charged."),
+        d.get("payment_terms","Pay within 30 days")
+    ))
+    el.append(sp(2))
+    el.extend(signatory_block(d.get("seller_name","")))
+    el.extend(footer_elems())
+    doc.build(el)
+    return buf.getvalue()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUILDER 4: CREDIT NOTE  (matches sample_credit_note_v13.pdf)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_credit_note(d: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = _new_doc(buf)
+    el  = []
+
+    el.append(doc_header("CREDIT NOTE"))
+    el.append(sp(2))
+
+    # Reference block (top summary — unique to credit notes)
+    cn_no     = d.get("invoice_number") or d.get("credit_note_number","")
+    cn_date   = d.get("invoice_date", datetime.now().strftime("%d/%m/%Y"))
+    orig_no   = d.get("original_invoice_number","")
+    orig_date = d.get("original_invoice_date","")
+    reason    = d.get("reason") or d.get("credit_reason","Cancellation of invoice as requested by seller")
+
+    ref = Table(
+        [[p(f"<b>Credit Note No:</b> {cn_no}",    "body"),
+          p(f"<b>Credit Note Date:</b> {cn_date}", "body")],
+         [p(f"<b>Against Invoice No:</b> {orig_no}",       "body"),
+          p(f"<b>Original Invoice Date:</b> {orig_date}",  "body")],
+         [p(f"<b>Reason:</b> {reason}", "body"), p("","body")]],
+        colWidths=[PAGE_W * 0.55, PAGE_W * 0.45]
     )
-    log.info(f"Report sent: {msg.sid}")
+    ref.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.8, TEAL),
+        ("BACKGROUND",    (0, 0), (-1, -1), colors.HexColor("#E8F5F5")),
+        ("INNERGRID",     (0, 0), (-1, -1), 0.2, colors.lightgrey),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+    ]))
+    el.append(ref)
+    el.append(sp(2))
 
+    el.append(seller_invoice_section(
+        d, show_gstin=True, show_reverse=False,
+        right_lbl="CREDIT NOTE DETAILS", no_lbl="Credit Note No"
+    ))
+    el.append(sp(2))
+    el.append(bill_to_section(d, show_gstin=True))
+    el.append(sp(3))
+    el.append(items_table_7col(d.get("items", [])))
+    el.append(sp(2))
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# FULL REPORT PIPELINE — called from webhook
-# ═══════════════════════════════════════════════════════════════════════════════
+    cr    = float(d.get("cgst_rate", 0))
+    sr    = float(d.get("sgst_rate", 0))
+    ir    = float(d.get("igst_rate", 0))
+    inter = str(d.get("is_interstate","false")).lower() == "true"
+    tr    = [[p("Taxable Value Reversed","body"),
+              p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")]]
+    if inter:
+        tr.append([p(f"IGST @ {fmt_i(ir)}% (Reversed)","red_b"),
+                   p(f"(₹ {fmt(d.get('igst',0))})","red_r")])
+    else:
+        tr.append([p(f"CGST @ {fmt_i(cr)}% (Reversed)","red_b"),
+                   p(f"(₹ {fmt(d.get('cgst',0))})","red_r")])
+        tr.append([p(f"SGST @ {fmt_i(sr)}% (Reversed)","red_b"),
+                   p(f"(₹ {fmt(d.get('sgst',0))})","red_r")])
+    tr.append([p("TOTAL CREDIT AMOUNT","grand_l"),
+               p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")])
+    el.append(totals_box(tr))
+    el.append(sp(2))
+    el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
+    el.append(sp(3))
 
-def handle_report_request(twilio, from_num, seller, month_num, year, lang):
-    """End-to-end: fetch → aggregate → PDF → send."""
-    month_name = MONTH_NAMES[month_num]
-
-    # Acknowledge immediately
-    send_msg(twilio, from_num,
-        f"📊 Generating your *{month_name} {year} report*... ⏳\n_(This may take 30–60 seconds)_"
-        if lang != "telugu" else
-        f"📊 మీ *{month_name} {year} report* generate అవుతోంది... ⏳\n_(30–60 seconds పట్టవచ్చు)_"
+    decl_text = d.get("declaration",
+        "This Credit Note cancels and fully reverses the above mentioned invoice. "
+        "The tax liability has been reduced accordingly. This document is valid for "
+        "GST credit note purposes under Section 34 of CGST Act 2017.")
+    decl_t = Table(
+        [[p("DECLARATION","body_b")],
+         [p(decl_text,"body")],
+         [p(f"<b>Original Invoice:</b> {orig_no}  |  <b>Reason:</b> {reason}","body")]],
+        colWidths=[PAGE_W]
     )
-
-    invoices = fetch_monthly_invoices(from_num, month_num, year)
-
-    if not invoices:
-        send_msg(twilio, from_num,
-            f"ℹ️ No invoices found for *{month_name} {year}*.\n"
-            f"Send a voice note to create invoices first!"
-            if lang != "telugu" else
-            f"ℹ️ *{month_name} {year}* లో invoices కనుగొనబడలేదు.\n"
-            f"Invoice create చేయడానికి voice note పంపండి!"
-        )
-        return
-
-    report_data = aggregate_report_data(invoices, seller, month_num, year)
-    pdf_url     = generate_report_pdf(report_data)
-    send_report_whatsapp(twilio, from_num, pdf_url, report_data, lang)
-    log.info(f"✅ Report delivered for {from_num} — {month_name} {year}")
-
+    decl_t.setStyle(TableStyle([
+        ("BOX",           (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("BACKGROUND",    (0, 0), (-1, 0), LGRAY),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+    ]))
+    el.append(decl_t)
+    el.append(sp(2))
+    el.extend(signatory_block(d.get("seller_name","")))
+    el.extend(footer_elems())
+    doc.build(el)
+    return buf.getvalue()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ONBOARDING MESSAGES — identical to v10
+# BUILDER 5: MONTHLY REPORT  (matches sample_monthly_report_v13.pdf)
+# 5 Sections + Final Tax Liability Summary
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def msg_welcome():
-    return (
-        "🎙️ *Welcome to GutInvoice!*\n"
-        "_Every Invoice has a Voice_\n\n"
-        "Please choose your preferred language:\n\n"
-        "1️⃣  *English*\n"
-        "2️⃣  *Telugu* (తెలుగు)\n"
-        "3️⃣  *Both* (English + Telugu)\n\n"
-        "Reply with *1*, *2*, or *3*"
+def build_monthly_report(rep: dict) -> bytes:
+    buf = io.BytesIO()
+    doc = _new_doc(buf)
+    el  = []
+
+    month = rep.get("report_month","")
+    year  = rep.get("report_year", datetime.now().year)
+    el.append(doc_header(f"Invoice & Tax Liability Report — {month} {year}"))
+    el.append(sp(2))
+
+    # Seller header line
+    sname  = rep.get("seller_name","")
+    sgstin = rep.get("seller_gstin","")
+    saddr  = rep.get("seller_address","")
+    gdate  = datetime.now().strftime("%d/%m/%Y")
+    el.append(Table(
+        [[p(f"<b>{sname}</b>  |  {saddr}","body"),
+          p(f"<b>GSTIN:</b> {sgstin}  |  <b>Generated:</b> {gdate}","body_r")]],
+        colWidths=[PAGE_W*0.6, PAGE_W*0.4]
+    ))
+    el.append(sp(2))
+
+    # KPI Summary box
+    s = rep.get("summary",{})
+    kpi = Table(
+        [[p("Total Invoices","sec_hdr"),
+          p("Total Taxable Value","sec_hdr"),
+          p("Total GST Payable","sec_hdr")],
+         [p(str(s.get("total_invoices",0)),"grand_l"),
+          p(f"Rs. {fmt(s.get('taxable_value',0))}","grand_l"),
+          p(f"Rs. {fmt(s.get('total_gst',0))}","grand_l")]],
+        colWidths=[PAGE_W/3]*3
     )
+    kpi.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0), TEAL),
+        ("BACKGROUND",    (0,1),(-1,1), LGRAY),
+        ("BOX",           (0,0),(-1,-1), 0.8, TEAL),
+        ("INNERGRID",     (0,0),(-1,-1), 0.5, colors.lightgrey),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    el.append(kpi)
+    el.append(sp(4))
 
-def msg_lang_confirmed(lang):
-    return {"english":"✅ Language set to *English*.",
-            "telugu": "✅ భాష *Telugu* గా సెట్ చేయబడింది.",
-            "both":   "✅ Language set to *English + Telugu*."}.get(lang,"✅ Done.")
+    # Reusable section renderer for A/B/C/E
+    def render_section(section_title, inv_list):
+        el.append(p(f"<b>{section_title}</b>","body_b"))
+        el.append(sp(1))
+        if not inv_list:
+            el.append(Table([[p("No invoices in this category.","body")]],
+                            colWidths=[PAGE_W]))
+            el.append(sp(3))
+            return
+        CW = [PAGE_W*w for w in [0.18,0.10,0.17,0.22,0.12,0.07,0.07,0.07]]
+        hdr = [p("Invoice No","th"), p("Date","th"), p("Customer","th"),
+               p("Description","th"), p("Taxable Rs.","th"),
+               p("CGST Rs.","th"),   p("SGST Rs.","th"), p("IGST Rs.","th")]
+        rows = [hdr]
+        tot = {"tax":0,"cgst":0,"sgst":0,"igst":0}
+        for inv in inv_list:
+            d_   = inv.get("_data",{})
+            desc = d_.get("items",[{}])[0].get("description","") if d_.get("items") else ""
+            rows.append([
+                p(inv.get("invoice_number",""),"td_l"),
+                p(inv.get("invoice_date",""),  "td_c"),
+                p(inv.get("customer_name",""), "td_l"),
+                p(desc,                        "td_l"),
+                p(fmt(inv.get("taxable_value",0)),"td_r"),
+                p(fmt(inv.get("cgst",0)),         "td_r"),
+                p(fmt(inv.get("sgst",0)),         "td_r"),
+                p(fmt(inv.get("igst",0)),         "td_r"),
+            ])
+            tot["tax"]  += float(inv.get("taxable_value",0))
+            tot["cgst"] += float(inv.get("cgst",0))
+            tot["sgst"] += float(inv.get("sgst",0))
+            tot["igst"] += float(inv.get("igst",0))
+        rows.append([
+            p(f"TOTAL ({len(inv_list)} invoices)","td_l"),
+            p("","td_c"),p("","td_l"),p("","td_l"),
+            p(fmt(tot["tax"]),"td_r"),
+            p(fmt(tot["cgst"]),"td_r"),
+            p(fmt(tot["sgst"]),"td_r"),
+            p(fmt(tot["igst"]),"td_r"),
+        ])
+        t = Table(rows, colWidths=CW, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  TEAL),
+            ("BACKGROUND",    (0,-1),(-1,-1), LGRAY),
+            ("ROWBACKGROUNDS",(0,1),(-1,-2), [WHITE, colors.HexColor("#F9F9F9")]),
+            ("BOX",           (0,0),(-1,-1),  0.5, colors.lightgrey),
+            ("INNERGRID",     (0,0),(-1,-1),  0.3, colors.lightgrey),
+            ("FONTNAME",      (0,-1),(-1,-1), "Helvetica-Bold"),
+            ("TOPPADDING",    (0,0),(-1,-1),  3),
+            ("BOTTOMPADDING", (0,0),(-1,-1),  3),
+            ("VALIGN",        (0,0),(-1,-1),  "MIDDLE"),
+        ]))
+        el.append(t)
+        el.append(sp(3))
 
-def msg_ask_register(lang):
-    if lang == "telugu":
-        return ("\n\n📝 మీ వ్యాపార వివరాలు నమోదు చేయాలా?\n"
-                "_(ఒక్కసారి నమోదు చేస్తే — ప్రతి invoice లో auto-fill అవుతాయి!)_\n\n"
-                "✅ *YES* — నమోదు చేయండి\n⏭️ *NO* — Skip & start")
-    return ("\n\n📝 Would you like to register your *business details*?\n"
-            "_(Set once — auto-filled on every invoice forever!)_\n\n"
-            "✅ Reply *YES* to register\n⏭️ Reply *NO* to skip and start")
+    render_section("SECTION A — TAX INVOICES (GST Registered)",      rep.get("tax_invoices",[]))
+    render_section("SECTION B — BILL OF SUPPLY (Composition / Exempt)", rep.get("bos_invoices",[]))
+    render_section("SECTION C — NON-GST INVOICES (Unregistered)",    rep.get("nongst_invoices",[]))
 
-def msg_ask_name(lang):
-    if lang == "telugu":
-        return "🏪 మీ *వ్యాపార పేరు* చెప్పండి:\n_(skip చేయాలంటే *SKIP* అని పంపండి)_"
-    return "🏪 Enter your *Business Name*:\n_(Type *SKIP* to leave blank)_"
+    # Section D — HSN-WISE TAX SUMMARY
+    el.append(p("<b>SECTION D — HSN-WISE TAX SUMMARY</b>","body_b"))
+    el.append(sp(1))
+    hsn_list = rep.get("hsn_summary",[])
+    if hsn_list:
+        CW2 = [PAGE_W*w for w in [0.12,0.26,0.15,0.12,0.12,0.12,0.11]]
+        hdr2 = [p("HSN Code","th"), p("Description","th"), p("Taxable Rs.","th"),
+                p("CGST Rs.","th"), p("SGST Rs.","th"), p("IGST Rs.","th"),
+                p("Total Tax Rs.","th")]
+        rows2 = [hdr2]
+        gt = {"tax":0,"cgst":0,"sgst":0,"igst":0,"taxable":0}
+        for h in hsn_list:
+            ttax = float(h.get("cgst",0))+float(h.get("sgst",0))+float(h.get("igst",0))
+            rows2.append([
+                p(str(h.get("hsn","")),"td_c"),
+                p(str(h.get("description","")),"td_l"),
+                p(fmt(h.get("taxable",0)),"td_r"),
+                p(fmt(h.get("cgst",0)),"td_r"),
+                p(fmt(h.get("sgst",0)),"td_r"),
+                p(fmt(h.get("igst",0)),"td_r"),
+                p(fmt(ttax),"td_r"),
+            ])
+            gt["taxable"] += float(h.get("taxable",0))
+            gt["cgst"]    += float(h.get("cgst",0))
+            gt["sgst"]    += float(h.get("sgst",0))
+            gt["igst"]    += float(h.get("igst",0))
+            gt["tax"]     += ttax
+        rows2.append([
+            p("GRAND TOTAL","td_l"), p("","td_l"),
+            p(fmt(gt["taxable"]),"td_r"), p(fmt(gt["cgst"]),"td_r"),
+            p(fmt(gt["sgst"]),"td_r"),   p(fmt(gt["igst"]),"td_r"),
+            p(fmt(gt["tax"]),"td_r")
+        ])
+        ht = Table(rows2, colWidths=CW2, repeatRows=1)
+        ht.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0),  TEAL),
+            ("BACKGROUND",    (0,-1),(-1,-1), LGRAY),
+            ("ROWBACKGROUNDS",(0,1),(-1,-2), [WHITE, colors.HexColor("#F9F9F9")]),
+            ("BOX",           (0,0),(-1,-1),  0.5, colors.lightgrey),
+            ("INNERGRID",     (0,0),(-1,-1),  0.3, colors.lightgrey),
+            ("FONTNAME",      (0,-1),(-1,-1), "Helvetica-Bold"),
+            ("TOPPADDING",    (0,0),(-1,-1),  3),
+            ("BOTTOMPADDING", (0,0),(-1,-1),  3),
+            ("VALIGN",        (0,0),(-1,-1),  "MIDDLE"),
+        ]))
+        el.append(ht)
+    else:
+        el.append(Table([[p("No HSN/SAC data available.","body")]],colWidths=[PAGE_W]))
+    el.append(sp(3))
 
-def msg_ask_address(lang):
-    if lang == "telugu":
-        return "📍 మీ *వ్యాపార చిరునామా* చెప్పండి:\n_(skip చేయాలంటే *SKIP* అని పంపండి)_"
-    return "📍 Enter your *Business Address*:\n_(Type *SKIP* to leave blank)_"
+    render_section("SECTION E — CREDIT NOTES (Cancelled Invoices)", rep.get("credit_notes",[]))
 
-def msg_ask_gstin(lang):
-    if lang == "telugu":
-        return "🔢 మీ *GSTIN నంబర్* చెప్పండి:\n_(లేకపోతే *SKIP* అని పంపండి)_"
-    return "🔢 Enter your *GSTIN Number*:\n_(Type *SKIP* if not applicable)_"
-
-def msg_reg_complete(lang, seller):
-    name = seller.get("seller_name") or "Not set"
-    addr = seller.get("seller_address") or "Not set"
-    gstin= seller.get("seller_gstin") or "Not set"
-    if lang == "telugu":
-        return (f"✅ *నమోదు పూర్తయింది!*\n\n🏪 పేరు: {name}\n📍 చిరునామా: {addr}\n"
-                f"🔢 GSTIN: {gstin}\n\n🎙️ Voice note పంపండి — 30 seconds లో PDF వస్తుంది!\n"
-                f"_ఉదాహరణ: \"Customer Suresh, 50 iron rods, 800 rupees, 18% GST\"_")
-    return (f"✅ *Registration Complete!*\n\n🏪 Name: {name}\n📍 Address: {addr}\n"
-            f"🔢 GSTIN: {gstin}\n\n🎙️ Send a *voice note* with invoice details.\n"
-            f"_Example: \"Customer Suresh, 50 iron rods, 800 each, 18% GST\"_")
-
-def msg_ready(lang):
-    if lang == "telugu":
-        return ("✅ *GutInvoice Ready!*\n\n🎙️ Voice note పంపండి — 30 seconds లో PDF వస్తుంది!\n"
-                "_ఉదాహరణ: \"Customer Suresh, 50 rods, 800 rupees each, 18% GST\"_")
-    return ("✅ *GutInvoice Ready!*\n\n🎙️ Send a *voice note* with invoice details.\n"
-            "_Example: \"Customer Suresh, 50 rods, 800 each, 18% GST\"_")
-
-def msg_voice_reminder(lang):
-    if lang == "telugu":
-        return ("🎙️ Invoice కోసం *voice note* పంపండి!\n"
-                "📊 Monthly report కోసం: *'January 2026 summary'* అని పంపండి\n"
-                "_సహాయానికి *HELP* type చేయండి._")
-    return ("🎙️ Send a *voice note* to generate an invoice!\n"
-            "📊 For monthly report: type *'January 2026 summary'*\n"
-            "_Type *HELP* for all commands._")
-
-def msg_help(lang):
-    if lang == "telugu":
-        return ("📖 *GutInvoice Help*\n\n"
-                "🎙️ *Voice note* — invoice generate చేయండి\n"
-                "📊 *'January 2026 summary'* — monthly report పంపండి\n"
-                "📝 *UPDATE* — profile update చేయండి\n"
-                "📈 *STATUS* — invoice count చూడండి\n\n"
-                "_ఉదాహరణ: \"Customer Suresh, 50 rods, 800 each, 18% GST\"_")
-    return ("📖 *GutInvoice Help*\n\n"
-            "🎙️ *Voice note* — generate an invoice\n"
-            "📊 *'January 2026 summary'* — get monthly PDF report\n"
-            "📝 *UPDATE* — change your business profile\n"
-            "📈 *STATUS* — see your invoice count\n\n"
-            "_Example: \"Customer Suresh, 50 rods, 800 each, 18% GST\"_")
-
-def msg_status(lang, seller):
-    name  = seller.get("seller_name") or "Not set"
-    gstin = seller.get("seller_gstin") or "Not set"
-    count = seller.get("total_invoices", 0)
-    if lang == "telugu":
-        return f"📊 *మీ GutInvoice Status*\n\n🏪 {name}\n🔢 GSTIN: {gstin}\n📄 Total Invoices: {count}"
-    return f"📊 *Your GutInvoice Status*\n\n🏪 {name}\n🔢 GSTIN: {gstin}\n📄 Total Invoices: {count}"
-
-def send_msg(twilio, to, body):
-    twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"), to=to, body=body)
-
+    # FINAL TAX LIABILITY SUMMARY
+    el.append(p("<b>FINAL TAX LIABILITY SUMMARY</b>","body_b"))
+    el.append(sp(1))
+    fs = rep.get("final_summary",{})
+    fs_rows = [
+        [p("Gross Taxable Value (all invoices)","body"),
+         p(f"Rs. {fmt(fs.get('gross_taxable',0))}","body_r")],
+        [p("Gross CGST Collected","body"),
+         p(f"Rs. {fmt(fs.get('gross_cgst',0))}","body_r")],
+        [p("Gross SGST Collected","body"),
+         p(f"Rs. {fmt(fs.get('gross_sgst',0))}","body_r")],
+        [p("Gross IGST Collected","body"),
+         p(f"Rs. {fmt(fs.get('gross_igst',0))}","body_r")],
+        [p("Less: CGST Reversed (Credit Notes)","red_b"),
+         p(f"(Rs. {fmt(fs.get('reversed_cgst',0))})","red_r")],
+        [p("Less: SGST Reversed (Credit Notes)","red_b"),
+         p(f"(Rs. {fmt(fs.get('reversed_sgst',0))})","red_r")],
+        [p("Less: IGST Reversed (Credit Notes)","red_b"),
+         p(f"(Rs. {fmt(fs.get('reversed_igst',0))})","red_r")],
+        [p("NET GST PAYABLE TO GOVERNMENT ★","grand_l"),
+         p(f"Rs. {fmt(fs.get('net_gst',0))}","grand_r")],
+    ]
+    ft = Table(fs_rows, colWidths=[PAGE_W*0.72, PAGE_W*0.28])
+    ft.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, TEAL),
+        ("BACKGROUND",    (0,-1),(-1,-1), colors.HexColor("#E8F5F5")),
+        ("LINEABOVE",     (0,-1),(-1,-1), 1.5, TEAL),
+        ("INNERGRID",     (0,0),(-1,-2), 0.3, colors.lightgrey),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 6),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 6),
+        ("ALIGN",         (1,0),(1,-1),  "RIGHT"),
+    ]))
+    el.append(ft)
+    el.append(sp(3))
+    el.append(p("Use this report to prepare your GSTR-1 filing. "
+                "Verify all amounts with your Chartered Accountant before submission.","small_c"))
+    el.extend(footer_elems())
+    doc.build(el)
+    return buf.getvalue()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ONBOARDING STATE MACHINE — identical to v10
+# PDF ENTRY POINTS (with Supabase Storage upload)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def handle_onboarding(twilio, from_num, seller, body_text):
-    step = seller.get("onboarding_step","new")
-    lang = seller.get("language","english")
-    txt  = (body_text or "").strip()
+def upload_pdf_to_supabase(pdf_bytes, file_path):
+    url = f"{env('SUPABASE_URL')}/storage/v1/object/invoices/{file_path}"
+    h   = {"apikey": env("SUPABASE_KEY"),
+           "Authorization": f"Bearer {env('SUPABASE_KEY')}",
+           "Content-Type": "application/pdf",
+           "x-upsert": "true"}
+    r = requests.post(url, headers=h, data=pdf_bytes, timeout=30)
+    if r.status_code not in (200, 201):
+        raise Exception(f"Supabase upload {r.status_code}: {r.text[:200]}")
+    return f"{env('SUPABASE_URL')}/storage/v1/object/public/invoices/{file_path}"
 
-    if step == "new":
-        update_seller(from_num, {"onboarding_step":"language_asked"})
-        send_msg(twilio, from_num, msg_welcome())
-        return True
+def _clean_phone(phone):
+    return phone.replace("whatsapp:+","").replace("+","").replace(" ","")
 
-    if step == "language_asked":
-        chosen = {"1":"english","2":"telugu","3":"both"}.get(txt.strip())
-        if not chosen:
-            send_msg(twilio, from_num, "Please reply with *1* (English), *2* (Telugu), or *3* (Both).")
-            return True
-        update_seller(from_num, {"language":chosen,"onboarding_step":"registration_asked"})
-        send_msg(twilio, from_num, msg_lang_confirmed(chosen) + msg_ask_register(chosen))
-        return True
+def select_and_generate_pdf(invoice_data: dict, seller_phone: str) -> str:
+    itype = (invoice_data.get("invoice_type") or "").upper()
+    inv_no = invoice_data.get("invoice_number") or f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    if   "CREDIT" in itype: pdf_bytes, sub = build_credit_note(invoice_data),     "credit_notes"
+    elif "BILL"   in itype: pdf_bytes, sub = build_bill_of_supply(invoice_data),  "invoices"
+    elif "TAX"    in itype: pdf_bytes, sub = build_tax_invoice(invoice_data),     "invoices"
+    else:                   pdf_bytes, sub = build_nongst_invoice(invoice_data),  "invoices"
+    phone = _clean_phone(seller_phone)
+    return upload_pdf_to_supabase(pdf_bytes, f"{phone}/{sub}/{inv_no}.pdf")
 
-    if step == "registration_asked":
-        if txt.upper() in ("YES","Y","అవును","HA"):
-            update_seller(from_num, {"onboarding_step":"reg_name"})
-            send_msg(twilio, from_num, msg_ask_name(lang))
-        else:
-            update_seller(from_num, {"onboarding_step":"complete","is_profile_complete":False})
-            send_msg(twilio, from_num, msg_ready(lang))
-        return True
-
-    if step == "reg_name":
-        update_seller(from_num, {
-            "seller_name": None if txt.upper()=="SKIP" else txt,
-            "onboarding_step":"reg_address"
-        })
-        send_msg(twilio, from_num, msg_ask_address(lang))
-        return True
-
-    if step == "reg_address":
-        update_seller(from_num, {
-            "seller_address": None if txt.upper()=="SKIP" else txt,
-            "onboarding_step":"reg_gstin"
-        })
-        send_msg(twilio, from_num, msg_ask_gstin(lang))
-        return True
-
-    if step == "reg_gstin":
-        gstin_val = None if txt.upper()=="SKIP" else txt.upper().strip()
-        update_seller(from_num, {
-            "seller_gstin":gstin_val,
-            "onboarding_step":"complete",
-            "is_profile_complete":True
-        })
-        updated = get_seller(from_num) or {}
-        send_msg(twilio, from_num, msg_reg_complete(lang, updated))
-        return True
-
-    if step == "complete":
-        cmd = txt.upper()
-        if cmd in ("UPDATE","CHANGE","EDIT","PROFILE"):
-            update_seller(from_num, {"onboarding_step":"reg_name"})
-            send_msg(twilio, from_num, f"📝 Let's update your profile!\n\n{msg_ask_name(lang)}")
-        elif cmd in ("HELP","సహాయం"):
-            send_msg(twilio, from_num, msg_help(lang))
-        elif cmd in ("STATUS","STATS"):
-            fresh = get_seller(from_num) or seller
-            send_msg(twilio, from_num, msg_status(lang, fresh))
-        else:
-            send_msg(twilio, from_num, msg_voice_reminder(lang))
-        return True
-
-    return True
-
+def generate_report_pdf_and_upload(report_data: dict, seller_phone: str) -> str:
+    month = report_data.get("report_month","Report")
+    year  = report_data.get("report_year", datetime.now().year)
+    phone = _clean_phone(seller_phone)
+    return upload_pdf_to_supabase(build_monthly_report(report_data),
+                                  f"{phone}/reports/{month}_{year}.pdf")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# INVOICE PIPELINE — identical to v9/v10
+# SUPABASE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def sb_h():
+    return {"apikey": env("SUPABASE_KEY"),
+            "Authorization": f"Bearer {env('SUPABASE_KEY')}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"}
+
+def sb_url(table, q=""):
+    return f"{env('SUPABASE_URL')}/rest/v1/{table}{q}"
+
+def get_seller(phone):
+    r = requests.get(sb_url("sellers",f"?phone_number=eq.{phone}&limit=1"),
+                     headers=sb_h(), timeout=10)
+    d = safe_json(r,"get_seller")
+    return d[0] if isinstance(d,list) and d else None
+
+def create_seller(phone):
+    r = requests.post(sb_url("sellers"), headers=sb_h(),
+                      json={"phone_number":phone,"onboarding_step":"language_asked",
+                            "language":"english","created_at":datetime.utcnow().isoformat()},
+                      timeout=10)
+    d = safe_json(r,"create_seller")
+    return d[0] if isinstance(d,list) and d else d
+
+def update_seller(phone, updates):
+    r = requests.patch(sb_url("sellers",f"?phone_number=eq.{phone}"),
+                       headers=sb_h(), json=updates, timeout=10)
+    return safe_json(r,"update_seller")
+
+def save_invoice(phone, inv_data, pdf_url):
+    d = inv_data
+    payload = {
+        "seller_phone":   phone,
+        "invoice_type":   d.get("invoice_type","TAX INVOICE"),
+        "invoice_number": d.get("invoice_number",""),
+        "customer_name":  d.get("customer_name",""),
+        "total_amount":   d.get("total_amount",0),
+        "taxable_value":  d.get("taxable_value",0),
+        "cgst":           d.get("cgst",0),
+        "sgst":           d.get("sgst",0),
+        "igst":           d.get("igst",0),
+        "cgst_rate":      d.get("cgst_rate",0),
+        "sgst_rate":      d.get("sgst_rate",0),
+        "igst_rate":      d.get("igst_rate",0),
+        "invoice_data":   json.dumps(d),
+        "pdf_url":        pdf_url,
+        "created_at":     datetime.utcnow().isoformat(),
+        "invoice_month":  datetime.utcnow().month,
+        "invoice_year":   datetime.utcnow().year,
+        "invoice_date":   d.get("invoice_date",""),
+        "is_cancelled":   False,
+        "credit_note_for": d.get("original_invoice_number",""),
+    }
+    r = requests.post(sb_url("invoices"), headers=sb_h(), json=payload, timeout=10)
+    return safe_json(r,"save_invoice")
+
+def cancel_invoice_in_db(phone, invoice_number):
+    r = requests.patch(
+        sb_url("invoices",f"?seller_phone=eq.{phone}&invoice_number=eq.{invoice_number}"),
+        headers=sb_h(), json={"is_cancelled": True}, timeout=10
+    )
+    return safe_json(r,"cancel_invoice")
+
+def get_invoice_by_number(phone, invoice_number):
+    r = requests.get(
+        sb_url("invoices",f"?seller_phone=eq.{phone}&invoice_number=eq.{invoice_number}&limit=1"),
+        headers=sb_h(), timeout=10
+    )
+    d = safe_json(r,"get_invoice")
+    return d[0] if isinstance(d,list) and d else None
+
+def get_all_monthly_invoices(phone, month, year):
+    r = requests.get(
+        sb_url("invoices",f"?seller_phone=eq.{phone}&invoice_month=eq.{month}&invoice_year=eq.{year}"),
+        headers=sb_h(), timeout=15
+    )
+    return safe_json(r,"monthly_invoices")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEQUENTIAL INVOICE NUMBERING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_invoice_prefix(seller):
+    biz     = (seller.get("business_name") or seller.get("seller_name") or "GUT").upper()
+    cleaned = re.sub(r"[^A-Z0-9]","",biz)
+    return (cleaned + "GUT")[:3]
+
+def get_next_seq(phone, month, year, is_credit=False):
+    q = (f"?seller_phone=eq.{phone}&invoice_month=eq.{month}&invoice_year=eq.{year}"
+         f"&invoice_type={'eq.CREDIT NOTE' if is_credit else 'neq.CREDIT NOTE'}&select=id")
+    try:
+        r = requests.get(sb_url("invoices",q), headers=sb_h(), timeout=10)
+        return len(safe_json(r,"seq")) + 1
+    except Exception:
+        return 1
+
+def generate_invoice_number(phone, seller, month, year):
+    return f"{get_invoice_prefix(seller)}{get_next_seq(phone,month,year,False):03d}-{month:02d}{year}"
+
+def generate_credit_note_number(phone, seller, month, year):
+    return f"CN-{get_invoice_prefix(seller)}{get_next_seq(phone,month,year,True):03d}-{month:02d}{year}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INVOICE PIPELINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def download_audio(media_url):
-    if media_url.startswith("/"):
-        media_url = f"https://api.twilio.com{media_url}"
-    r = requests.get(
-        media_url,
-        auth=(env("TWILIO_ACCOUNT_SID"), env("TWILIO_AUTH_TOKEN")),
-        timeout=30
-    )
-    r.raise_for_status()
-    log.info(f"Audio: {len(r.content)} bytes | {r.headers.get('content-type')}")
+    r = requests.get(media_url, auth=(env("TWILIO_ACCOUNT_SID"),env("TWILIO_AUTH_TOKEN")),
+                     timeout=30)
+    if r.status_code != 200:
+        raise Exception(f"Audio download failed {r.status_code}")
+    log.info(f"Audio: {len(r.content)} bytes")
     return r.content
 
-
-def transcribe_audio(audio_bytes, language="english"):
-    src_lang = "te-IN" if language in ("telugu","both") else "en-IN"
+def transcribe_audio(audio_bytes, language="telugu"):
+    lang_map = {"telugu":"te-IN","english":"en-IN","both":"te-IN"}
     r = requests.post(
-        "https://api.sarvam.ai/speech-to-text-translate",
-        headers={"API-Subscription-Key": env("SARVAM_API_KEY")},
-        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-        data={
-            "model":"saaras:v2.5",
-            "source_language_code": src_lang,
-            "target_language_code":"en-IN"
-        },
+        "https://api.sarvam.ai/speech-to-text",
+        files={"file":("audio.ogg",audio_bytes,"audio/ogg")},
+        data={"model":"saaras:v2.5","language_code":lang_map.get(language,"te-IN"),
+              "with_disfluencies":"false"},
+        headers={"api-subscription-key":env("SARVAM_API_KEY")},
         timeout=60
     )
-    if r.status_code != 200:
-        raise Exception(f"Sarvam error {r.status_code}: {r.text[:300]}")
-    result = safe_json(r, "Sarvam")
-    transcript = (result.get("transcript","") or result.get("translated_text","")
-                  or result.get("text","") or "").strip()
-    if not transcript:
-        raise Exception("Sarvam returned empty transcript. Please speak clearly and try again.")
-    log.info(f"Transcript: {transcript}")
-    return transcript
+    tr = safe_json(r,"Sarvam").get("transcript","")
+    log.info(f"Transcript: {tr}")
+    return tr
 
-
-def extract_invoice_data(transcript, seller):
+def extract_invoice_data(transcript, seller, phone, month, year):
+    sname  = seller.get("business_name") or seller.get("seller_name") or ""
+    saddr  = seller.get("address") or seller.get("seller_address") or ""
+    sgstin = seller.get("gstin") or seller.get("seller_gstin") or ""
+    inv_no = generate_invoice_number(phone, seller, month, year)
     today  = datetime.now().strftime("%d/%m/%Y")
-    inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    seller_name    = seller.get("seller_name") or "My Business"
-    seller_address = seller.get("seller_address") or "Hyderabad, Telangana"
-    seller_gstin   = seller.get("seller_gstin") or ""
 
-    prompt = f"""You are a GST invoice assistant for Indian small businesses.
-Extract invoice details from this transcript and return ONLY valid JSON.
-Seller may speak Telugu, English, or a mix of both.
-
-Transcript: {transcript}
-
-Seller: {seller_name}, {seller_address}, GSTIN: {seller_gstin}
-Date: {today}, Invoice No: {inv_no}
-
-Rules:
-- invoice_type: "TAX INVOICE" (has GSTIN) | "BILL OF SUPPLY" (composition) | "INVOICE" (unregistered)
-- If seller has no GSTIN, use "INVOICE"
-- Intra-state (Telangana): CGST+SGST split equally. Inter-state: IGST only.
-- amount = qty x rate. total_amount = taxable_value + all taxes.
-- Default GST 18% if not mentioned.
-- BILL OF SUPPLY declaration: "Composition taxable person, not eligible to collect tax on supplies"
-- INVOICE declaration: "Seller not registered under GST. GST not applicable."
-
-Return ONLY this JSON, no extra text:
-{{"invoice_type":"TAX INVOICE","seller_name":"{seller_name}","seller_address":"{seller_address}","seller_gstin":"{seller_gstin}","invoice_number":"{inv_no}","invoice_date":"{today}","customer_name":"","customer_address":"","customer_gstin":"","place_of_supply":"Telangana","reverse_charge":"No","items":[{{"sno":1,"description":"","hsn_sac":"","qty":0,"unit":"Nos","rate":0,"amount":0}}],"taxable_value":0,"cgst_rate":9,"cgst_amount":0,"sgst_rate":9,"sgst_amount":0,"igst_rate":0,"igst_amount":0,"total_amount":0,"declaration":"","payment_terms":"Pay within 15 days"}}"""
-
-    claude = get_claude()
-    msg = claude.messages.create(
-        model="claude-opus-4-6", max_tokens=1500,
-        messages=[{"role":"user","content":prompt}]
+    system = (
+        'You are a GST invoice data extractor for Indian businesses. '
+        'Extract invoice details from the voice transcription and return ONLY valid JSON. '
+        'Rules: amounts as numbers only; dates as DD/MM/YYYY; '
+        'invoice_type = "TAX INVOICE" (GST mentioned), "BILL OF SUPPLY" (composition/exempt), '
+        '"INVOICE" (no GSTIN for seller); '
+        'cgst_rate=sgst_rate=gst_rate/2 for intrastate; igst_rate=full for interstate; '
+        'calculate all totals correctly; reverse_charge="No" by default.'
     )
-    if not msg.content or not msg.content[0].text:
-        raise Exception("Claude returned empty response.")
+    prompt = (
+        f'Transcription: "{transcript}"\n\n'
+        f'Pre-filled seller (use as-is):\n'
+        f'  seller_name: {sname}\n  seller_address: {saddr}\n'
+        f'  seller_gstin: {sgstin}\n  invoice_number: {inv_no}\n  invoice_date: {today}\n\n'
+        f'Return ONLY this JSON:\n{{\n'
+        f'  "invoice_type": "TAX INVOICE",\n'
+        f'  "invoice_number": "{inv_no}",\n'
+        f'  "invoice_date": "{today}",\n'
+        f'  "seller_name": "{sname}",\n'
+        f'  "seller_address": "{saddr}",\n'
+        f'  "seller_gstin": "{sgstin}",\n'
+        f'  "reverse_charge": "No",\n'
+        f'  "customer_name": "",\n'
+        f'  "customer_address": "",\n'
+        f'  "customer_gstin": "",\n'
+        f'  "place_of_supply": "",\n'
+        f'  "is_interstate": false,\n'
+        f'  "items": [{{"sno":"1","description":"","hsn_sac":"","qty":1,"unit":"Nos","rate":0,"amount":0}}],\n'
+        f'  "taxable_value": 0,\n'
+        f'  "cgst_rate": 9, "sgst_rate": 9, "igst_rate": 0,\n'
+        f'  "cgst": 0, "sgst": 0, "igst": 0,\n'
+        f'  "total_amount": 0,\n'
+        f'  "declaration": "We declare this invoice shows the actual price of goods/services described.",\n'
+        f'  "payment_terms": "Pay within 30 days"\n}}'
+    )
+    msg  = get_claude().messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=1500,
+        system=system, messages=[{"role":"user","content":prompt}]
+    )
     text = msg.content[0].text.strip()
-    log.info(f"Claude raw: {text[:300]}")
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    start = text.find("{"); end = text.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise Exception(f"No JSON in Claude response: {text[:200]}")
-    data = json.loads(text[start:end])
-    log.info(f"Invoice: {data.get('invoice_type')} for {data.get('customer_name')}")
+    if "```json" in text: text = text.split("```json")[1].split("```")[0].strip()
+    elif "```"   in text: text = text.split("```")[1].split("```")[0].strip()
+    s = text.find("{"); e = text.rfind("}")+1
+    if s==-1 or e==0: raise Exception(f"No JSON from Claude: {text[:200]}")
+    data = json.loads(text[s:e])
+    log.info(f"Invoice: {data.get('invoice_type')} #{data.get('invoice_number')} | {data.get('customer_name')}")
     return data
 
-
-def generate_pdf(invoice_data):
-    t = invoice_data.get("invoice_type","TAX INVOICE")
-    if "BILL" in t:    version_id = env("CARBONE_BOS_VERSION_ID")
-    elif "TAX" in t:   version_id = env("CARBONE_TAX_VERSION_ID")
-    else:              version_id = env("CARBONE_NONGST_VERSION_ID")
-    if not version_id:
-        raise Exception(f"Missing Carbone versionId for: {t}")
-    log.info(f"Carbone versionId: {version_id[:16]}... for {t}")
-    r = requests.post(
-        f"https://api.carbone.io/render/{version_id}?versioning=true",
-        headers={"Authorization":f"Bearer {env('CARBONE_API_KEY')}",
-                 "Content-Type":"application/json","carbone-version":"5"},
-        json={"data":invoice_data,"convertTo":"pdf"}, timeout=60
-    )
-    if r.status_code != 200:
-        raise Exception(f"Carbone error {r.status_code}: {r.text[:300]}")
-    result = safe_json(r,"Carbone-Render")
-    rid = result.get("data",{}).get("renderId")
-    if not rid:
-        raise Exception(f"Carbone returned no renderId: {result}")
-    pdf_url = f"https://api.carbone.io/render/{rid}"
-    log.info(f"PDF ready: {pdf_url}")
-    return pdf_url
-
-
-def send_invoice_whatsapp(twilio, to, pdf_url, invoice_data, lang="english"):
+def send_invoice_whatsapp(twilio, to, pdf_url, inv, lang="english"):
+    total = fmt(inv.get("total_amount",0))
+    itype = inv.get("invoice_type","Invoice")
+    inv_no = inv.get("invoice_number","")
+    cname  = inv.get("customer_name","")
     if lang == "telugu":
-        body = (f"✅ *మీ {invoice_data.get('invoice_type','Invoice')} Ready!*\n\n"
-                f"📋 {invoice_data.get('invoice_number','')}\n"
-                f"👤 {invoice_data.get('customer_name','Customer')}\n"
-                f"💰 ₹{invoice_data.get('total_amount',0):,.0f}\n\n"
+        body = (f"✅ *మీ {itype} Ready!*\n\n📋 Invoice No: {inv_no}\n"
+                f"👤 Customer: {cname}\n💰 Total: ₹ {total}\n\n"
                 f"Powered by *GutInvoice* 🎙️\n_మీ గొంతే మీ Invoice_")
     else:
-        body = (f"✅ *Your {invoice_data.get('invoice_type','Invoice')} is Ready!*\n\n"
-                f"📋 {invoice_data.get('invoice_number','')}\n"
-                f"👤 {invoice_data.get('customer_name','Customer')}\n"
-                f"💰 ₹{invoice_data.get('total_amount',0):,.0f}\n\n"
-                f"Powered by *GutInvoice* 🎙️\n_Every Invoice has a Voice_")
-    msg = twilio.messages.create(
-        from_=env("TWILIO_FROM_NUMBER"), to=to, body=body, media_url=[pdf_url]
-    )
-    log.info(f"Invoice sent: {msg.sid}")
-
+        body = (f"✅ *Your {itype} is Ready!*\n\n📋 Invoice No: {inv_no}\n"
+                f"👤 Customer: {cname}\n💰 Total: ₹ {total}\n\n"
+                f"Powered by *GutInvoice* 🎙️\n_Your voice. Your invoice._")
+    twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=to,body=body,media_url=[pdf_url])
+    log.info(f"Invoice sent to {to}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WEBHOOK — v11 adds report detection before everything else
+# CANCEL / CREDIT NOTE FLOW
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def is_cancel_request(text):
+    kw = ["cancel","void","రద్దు","wrong invoice","delete invoice","reverse invoice"]
+    return any(k in text.lower() for k in kw)
+
+def parse_invoice_ref(text):
+    """Extract invoice number like TEJ001-022026 from cancel text"""
+    m = re.search(r"([A-Z]{2,6}\d{3}-\d{6})", text.upper())
+    if m: return m.group(1)
+    m = re.search(r"(\d{3}-\d{6})", text)
+    if m: return m.group(1)
+    return None
+
+def handle_cancel_request(from_num, text, seller, twilio, lang):
+    ref = parse_invoice_ref(text)
+    if not ref:
+        msg = ("⚠️ Please specify the invoice number.\nExample: *cancel TEJ001-022026*"
+               if lang=="english"
+               else "⚠️ Invoice number చెప్పండి.\nExample: *cancel TEJ001-022026*")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return
+
+    orig = get_invoice_by_number(from_num, ref)
+    if not orig:
+        # Try prepending prefix if user gave only seq-mmyyyy
+        prefix = get_invoice_prefix(seller)
+        orig = get_invoice_by_number(from_num, f"{prefix}{ref}")
+
+    if not orig:
+        msg = (f"⚠️ Invoice *{ref}* not found in your records."
+               if lang=="english"
+               else f"⚠️ Invoice *{ref}* మీ records లో కనుగొనబడలేదు.")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return
+
+    if orig.get("is_cancelled"):
+        msg = (f"⚠️ Invoice *{orig['invoice_number']}* is already cancelled."
+               if lang=="english"
+               else f"⚠️ Invoice *{orig['invoice_number']}* ఇప్పటికే రద్దు చేయబడింది.")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return
+
+    if orig.get("invoice_type") == "CREDIT NOTE":
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,
+                               body="⚠️ Credit notes cannot be cancelled.")
+        return
+
+    # Mark original as cancelled (number never reused)
+    cancel_invoice_in_db(from_num, orig["invoice_number"])
+    log.info(f"Cancelled: {orig['invoice_number']} for {from_num}")
+
+    # Build credit note from original
+    try:
+        orig_data = json.loads(orig.get("invoice_data","{}"))
+    except Exception:
+        orig_data = orig
+    now    = datetime.utcnow()
+    cn_no  = generate_credit_note_number(from_num, seller, now.month, now.year)
+    credit = {
+        **orig_data,
+        "invoice_type":           "CREDIT NOTE",
+        "invoice_number":         cn_no,
+        "credit_note_number":     cn_no,
+        "invoice_date":           now.strftime("%d/%m/%Y"),
+        "original_invoice_number": orig["invoice_number"],
+        "original_invoice_date":   orig_data.get("invoice_date",""),
+        "reason":                 "Cancellation of invoice as requested by seller",
+        "credit_reason":          f"Cancellation of invoice {orig['invoice_number']}",
+    }
+    pdf_url = select_and_generate_pdf(credit, from_num)
+    save_invoice(from_num, credit, pdf_url)
+
+    total = fmt(orig_data.get("total_amount",0))
+    if lang=="telugu":
+        body = (f"✅ *Invoice {orig['invoice_number']} రద్దు చేయబడింది*\n\n"
+                f"📋 Credit Note: {cn_no}\n💰 Credit Amount: ₹ {total}\n\n"
+                f"Credit Note PDF పంపబడింది.")
+    else:
+        body = (f"✅ *Invoice {orig['invoice_number']} Cancelled*\n\n"
+                f"📋 Credit Note No: {cn_no}\n💰 Credit Amount: ₹ {total}\n\n"
+                f"Credit Note PDF has been generated and attached.")
+    twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,
+                           body=body, media_url=[pdf_url])
+    log.info(f"Credit note {cn_no} sent to {from_num}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MONTHLY REPORT HANDLER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+MONTH_MAP = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+    "జనవరి":1,"ఫిబ్రవరి":2,"మార్చి":3,"ఏప్రిల్":4,"మే":5,"జూన్":6,
+    "జులై":7,"ఆగస్టు":8,"సెప్టెంబర్":9,"అక్టోబర్":10,"నవంబర్":11,"డిసెంబర్":12
+}
+MNAMES = {v:k.capitalize() for k,v in MONTH_MAP.items() if k.isascii()}
+
+def is_report_request(text):
+    kw = ["report","summary","రిపోర్ట్","సమరీ","monthly","నెల","last month",
+          "tax summary","invoices summary","గత నెల"]
+    return any(k in text.lower() for k in kw)
+
+def parse_month_year(text):
+    tl = text.lower()
+    year = datetime.now().year
+    m = re.search(r"20\d{2}",text)
+    if m: year = int(m.group())
+    for name,num in MONTH_MAP.items():
+        if name in tl: return num, year
+    return datetime.now().month, year
+
+def _parse_row(raw):
+    try: d = json.loads(raw.get("invoice_data","{}"))
+    except Exception: d = {}
+    return {
+        "invoice_number": raw.get("invoice_number",""),
+        "invoice_date":   d.get("invoice_date", raw.get("invoice_date","")),
+        "customer_name":  raw.get("customer_name",""),
+        "invoice_type":   raw.get("invoice_type",""),
+        "taxable_value":  float(raw.get("taxable_value",0)),
+        "cgst":           float(raw.get("cgst",0)),
+        "sgst":           float(raw.get("sgst",0)),
+        "igst":           float(raw.get("igst",0)),
+        "total_amount":   float(raw.get("total_amount",0)),
+        "_data":          d,
+        "_cancelled":     raw.get("is_cancelled",False),
+    }
+
+def _build_hsn(inv_list):
+    hsn = {}
+    for inv in inv_list:
+        d = inv.get("_data",{})
+        cr = float(d.get("cgst_rate",0))
+        sr = float(d.get("sgst_rate",0))
+        ir = float(d.get("igst_rate",0))
+        inter = str(d.get("is_interstate","false")).lower()=="true"
+        for item in d.get("items",[]):
+            key = str(item.get("hsn_sac","")).strip()
+            if not key: continue
+            amt = float(item.get("amount",0))
+            if key not in hsn:
+                hsn[key] = {"hsn":key,"description":item.get("description",""),
+                            "taxable":0,"cgst":0,"sgst":0,"igst":0}
+            hsn[key]["taxable"] += amt
+            if inter: hsn[key]["igst"] += round(amt*ir/100,2)
+            else:
+                hsn[key]["cgst"] += round(amt*cr/100,2)
+                hsn[key]["sgst"] += round(amt*sr/100,2)
+    return list(hsn.values())
+
+def handle_report_request(from_num, text, seller, twilio, lang):
+    month_num, year = parse_month_year(text)
+    mname = MNAMES.get(month_num, str(month_num))
+    all_raw = get_all_monthly_invoices(from_num, month_num, year)
+
+    if not all_raw:
+        msg = (f"No invoices found for {mname} {year}."
+               if lang=="english" else f"{mname} {year} కి invoices లేవు.")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return
+
+    parsed    = [_parse_row(r) for r in all_raw]
+    credit_ns = [p for p in parsed if p["invoice_type"]=="CREDIT NOTE"]
+    regular   = [p for p in parsed if p["invoice_type"]!="CREDIT NOTE"]
+    active    = [p for p in regular if not p.get("_cancelled")]
+
+    tax_inv    = [i for i in active if "TAX"  in i["invoice_type"].upper()]
+    bos_inv    = [i for i in active if "BILL" in i["invoice_type"].upper()]
+    nongst_inv = [i for i in active if i["invoice_type"].upper() in ("INVOICE","NON-GST","NONGST")]
+
+    gross_tax  = sum(i["taxable_value"] for i in regular)
+    gross_cgst = sum(i["cgst"]          for i in regular)
+    gross_sgst = sum(i["sgst"]          for i in regular)
+    gross_igst = sum(i["igst"]          for i in regular)
+    rev_cgst   = sum(i["cgst"]          for i in credit_ns)
+    rev_sgst   = sum(i["sgst"]          for i in credit_ns)
+    rev_igst   = sum(i["igst"]          for i in credit_ns)
+    net_gst    = (gross_cgst+gross_sgst+gross_igst) - (rev_cgst+rev_sgst+rev_igst)
+
+    report = {
+        "report_month": mname, "report_year": year,
+        "seller_name":  seller.get("business_name") or seller.get("seller_name",""),
+        "seller_address": seller.get("address") or seller.get("seller_address",""),
+        "seller_gstin": seller.get("gstin") or seller.get("seller_gstin",""),
+        "summary": {"total_invoices":len(regular),
+                    "taxable_value":gross_tax, "total_gst":net_gst},
+        "tax_invoices":    tax_inv,
+        "bos_invoices":    bos_inv,
+        "nongst_invoices": nongst_inv,
+        "hsn_summary":     _build_hsn(active),
+        "credit_notes":    credit_ns,
+        "final_summary": {
+            "gross_taxable":gross_tax, "gross_cgst":gross_cgst,
+            "gross_sgst":gross_sgst,   "gross_igst":gross_igst,
+            "reversed_cgst":rev_cgst,  "reversed_sgst":rev_sgst,
+            "reversed_igst":rev_igst,  "net_gst":net_gst,
+        }
+    }
+    pdf_url = generate_report_pdf_and_upload(report, from_num)
+    msg = (f"📊 *{mname} {year} Report Ready!*\n\n"
+           f"🧾 Total Invoices: {len(regular)}\n"
+           f"💰 Gross Taxable: ₹ {fmt(gross_tax)}\n"
+           f"🏷️ Net GST Payable: ₹ {fmt(net_gst)}"
+           + (f"\n📋 Credit Notes: {len(credit_ns)}" if credit_ns else ""))
+    twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,
+                           body=msg, media_url=[pdf_url])
+    log.info(f"Report sent to {from_num}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ONBOARDING FLOW
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def handle_onboarding(from_num, body, seller, twilio):
+    step = seller.get("onboarding_step","language_asked")
+    lang = seller.get("language","english")
+    tl   = (body or "").strip().lower()
+
+    if step == "language_asked":
+        if any(x in tl for x in ["1","english"]):
+            update_seller(from_num,{"language":"english","onboarding_step":"registration_asked"})
+            msg = ("Great! You chose English 🇬🇧\n\n"
+                   "Would you like to register your business details?\n"
+                   "Type *YES* to register  |  Type *SKIP* to start invoicing directly")
+        elif any(x in tl for x in ["2","telugu","తెలుగు"]):
+            update_seller(from_num,{"language":"telugu","onboarding_step":"registration_asked"})
+            msg = ("బాగుంది! తెలుగు ఎంచుకున్నారు 🙏\n\n"
+                   "మీ వ్యాపార వివరాలు నమోదు చేయాలా?\n"
+                   "*YES* type చేయండి  |  *SKIP* type చేస్తే నేరుగా invoice చేయవచ్చు")
+        else:
+            msg = ("Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\n"
+                   "Choose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return True
+
+    if step == "registration_asked":
+        if any(x in tl for x in ["yes","అవున"]):
+            update_seller(from_num,{"onboarding_step":"reg_name"})
+            msg = ("Please enter your *Business Name*:" if lang=="english"
+                   else "మీ *వ్యాపార పేరు* enter చేయండి:")
+        else:
+            update_seller(from_num,{"onboarding_step":"complete"})
+            msg = ("✅ Setup complete! Send a voice note to create your first invoice. 🎙️"
+                   if lang=="english"
+                   else "✅ Setup పూర్తయింది! Voice note పంపి invoice చేయండి. 🎙️")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return True
+
+    if step == "reg_name":
+        update_seller(from_num,{"business_name":body.strip(),"onboarding_step":"reg_address"})
+        msg = ("Enter your *Business Address*:" if lang=="english"
+               else "మీ *వ్యాపార చిరునామా* enter చేయండి:")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return True
+
+    if step == "reg_address":
+        update_seller(from_num,{"address":body.strip(),"onboarding_step":"reg_gstin"})
+        msg = ("Enter your *GSTIN* (or type *SKIP* if unregistered):" if lang=="english"
+               else "మీ *GSTIN* enter చేయండి (లేకుంటే *SKIP* type చేయండి):")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return True
+
+    if step == "reg_gstin":
+        gstin = "" if "skip" in tl else body.strip().upper()
+        update_seller(from_num,{"gstin":gstin,"onboarding_step":"complete"})
+        name = seller.get("business_name","")
+        msg  = (f"✅ *Registration Complete!*\nWelcome, {name}!\n\n"
+                f"Send a voice note to create your first invoice. 🎙️\n"
+                f"Type *HELP* for all commands."
+                if lang=="english"
+                else f"✅ *నమోదు పూర్తయింది!*\n{name} కి స్వాగతం!\n\n"
+                     f"Voice note పంపి invoice చేయండి. 🎙️\n"
+                     f"Commands కోసం *HELP* type చేయండి.")
+        twilio.messages.create(from_=env("TWILIO_FROM_NUMBER"),to=from_num,body=msg)
+        return True
+
+    return False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TWILIO WEBHOOK
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    twilio     = get_twilio()
-    from_num   = request.form.get("From","")
-    body_text  = request.form.get("Body","").strip()
-    num_media  = int(request.form.get("NumMedia",0))
-    media_type = request.form.get("MediaContentType0","")
-    media_url  = request.form.get("MediaUrl0","")
-
-    log.info(f"Webhook — From: {from_num} | Media: {num_media} | Body: '{body_text[:60]}'")
+    from_num  = request.form.get("From","")
+    body      = request.form.get("Body","") or ""
+    media_url = request.form.get("MediaUrl0","")
+    num_media = int(request.form.get("NumMedia",0))
+    log.info(f"Webhook | From:{from_num} | Body:{body[:60]} | Media:{num_media}")
 
     try:
-        seller = get_or_create_seller(from_num)
-        step   = seller.get("onboarding_step","new")
-        lang   = seller.get("language","english")
+        twilio = get_twilio()
+        seller = get_seller(from_num)
 
-        # ── AUDIO (voice note) ───────────────────────────────────────────────
-        if num_media > 0 and ("audio" in media_type or "ogg" in media_type):
-
-            if step != "complete":
-                if step == "new":
-                    handle_onboarding(twilio, from_num, seller, "")
-                else:
-                    send_msg(twilio, from_num,
-                        "Please finish the quick setup first! Reply to the question above. 🙏")
-                return Response("OK", status=200)
-
-            # Transcribe first to check if it's a report request
-            send_msg(twilio, from_num,
-                "🎙️ Voice note received! Processing... ⏳"
-                if lang != "telugu" else
-                "🎙️ Voice note అందింది! Process అవుతోంది... ⏳"
+        if not seller:
+            seller = create_seller(from_num)
+            twilio.messages.create(
+                from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                body=("Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\n"
+                      "Choose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు")
             )
+            return Response("",status=200)
 
-            audio      = download_audio(media_url)
-            transcript = transcribe_audio(audio, lang)
+        lang = seller.get("language","english")
+        step = seller.get("onboarding_step","complete")
 
-            # ── Check if voice is asking for a REPORT ───────────────────────
-            is_report, month_num, year = detect_report_from_voice(transcript)
-            if is_report:
-                handle_report_request(twilio, from_num, seller, month_num, year, lang)
-                return Response("OK", status=200)
+        if step != "complete":
+            handle_onboarding(from_num,body,seller,twilio)
+            return Response("",status=200)
 
-            # ── Regular invoice pipeline ─────────────────────────────────────
-            send_msg(twilio, from_num,
-                "Generating your invoice... _(Ready in ~30 seconds)_"
-                if lang != "telugu" else
-                "Invoice generate అవుతోంది... _(30 seconds లో ready)_"
+        tl = (body or "").strip().lower()
+
+        # Commands
+        if tl in ("help","హెల్ప్","status"):
+            name  = seller.get("business_name") or from_num
+            gstin = seller.get("gstin") or "Not set"
+            addr  = seller.get("address") or "Not set"
+            twilio.messages.create(
+                from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                body=(f"📋 *GutInvoice — Your Profile*\n\n"
+                      f"👤 {name}\n📍 {addr}\n🔑 GSTIN: {gstin}\n\n"
+                      f"🎙️ *Voice note* → Create invoice\n"
+                      f"📊 *report feb 2026* → Monthly report\n"
+                      f"❌ *cancel TEJ001-022026* → Cancel + credit note\n"
+                      f"✏️ *update* → Update profile")
             )
-            invoice = extract_invoice_data(transcript, seller)
-            pdf_url = generate_pdf(invoice)
-            save_invoice(from_num, invoice, pdf_url, transcript)
-            send_invoice_whatsapp(twilio, from_num, pdf_url, invoice, lang)
-            log.info(f"✅ Invoice delivered + saved for {from_num}")
-            return Response("OK", status=200)
+            return Response("",status=200)
 
-        # ── NON-AUDIO MEDIA ──────────────────────────────────────────────────
-        if num_media > 0 and "audio" not in media_type:
-            send_msg(twilio, from_num,
-                "Please send a *voice note* 🎙️, not an image or document."
-                if lang != "telugu" else
-                "*Voice note* పంపండి 🎙️ — image లేదా document కాదు."
+        if tl in ("update","register"):
+            update_seller(from_num,{"onboarding_step":"reg_name"})
+            twilio.messages.create(
+                from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                body=("Enter your *Business Name*:" if lang=="english"
+                      else "మీ *వ్యాపార పేరు* enter చేయండి:")
             )
-            return Response("OK", status=200)
+            return Response("",status=200)
 
-        # ── TEXT MESSAGE ─────────────────────────────────────────────────────
-        if step == "complete" and body_text:
-            # Check if text is a report request BEFORE onboarding handler
-            is_report, month_num, year = is_report_request(body_text)
-            if is_report:
-                handle_report_request(twilio, from_num, seller, month_num, year, lang)
-                return Response("OK", status=200)
+        if is_cancel_request(body) and not num_media:
+            handle_cancel_request(from_num,body,seller,twilio,lang)
+            return Response("",status=200)
 
-        # Route through onboarding handler
-        handle_onboarding(twilio, from_num, seller, body_text)
-        return Response("OK", status=200)
+        if is_report_request(body) and not num_media:
+            handle_report_request(from_num,body,seller,twilio,lang)
+            return Response("",status=200)
+
+        if num_media and media_url:
+            twilio.messages.create(
+                from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                body=("🎙️ Processing your voice note... ~20 seconds." if lang=="english"
+                      else "🎙️ Voice note process అవుతుంది... ~20 seconds.")
+            )
+            audio = download_audio(media_url)
+            tr    = transcribe_audio(audio, lang)
+            if not tr.strip():
+                twilio.messages.create(
+                    from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                    body=("⚠️ Could not understand audio. Please try again clearly."
+                          if lang=="english"
+                          else "⚠️ Audio అర్థం కాలేదు. మళ్ళీ clearly చెప్పండి.")
+                )
+                return Response("",status=200)
+
+            if is_cancel_request(tr):
+                handle_cancel_request(from_num,tr,seller,twilio,lang)
+                return Response("",status=200)
+            if is_report_request(tr):
+                handle_report_request(from_num,tr,seller,twilio,lang)
+                return Response("",status=200)
+
+            now = datetime.utcnow()
+            inv = extract_invoice_data(tr, seller, from_num, now.month, now.year)
+            url = select_and_generate_pdf(inv, from_num)
+            save_invoice(from_num, inv, url)
+            send_invoice_whatsapp(twilio, from_num, url, inv, lang)
+            log.info(f"✅ Done | {inv.get('invoice_number')} | {from_num}")
+            return Response("",status=200)
+
+        twilio.messages.create(
+            from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+            body=("🎙️ Send a *voice note* to create an invoice.\nType *HELP* for commands."
+                  if lang=="english"
+                  else "🎙️ Invoice కోసం voice note పంపండి.\nCommands కోసం *HELP* type చేయండి.")
+        )
+        return Response("",status=200)
 
     except Exception as e:
-        log.error(f"❌ Error: {e}", exc_info=True)
+        log.error(f"Webhook error: {e}", exc_info=True)
         try:
-            send_msg(twilio, from_num, f"❌ Error: {str(e)[:180]}\n\nPlease try again.")
-        except:
-            pass
-        return Response("Error", status=500)
-
+            twilio = get_twilio()
+            lang = "english"
+            try:
+                s = get_seller(from_num)
+                lang = (s or {}).get("language","english")
+            except Exception: pass
+            twilio.messages.create(
+                from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+                body=("⚠️ Something went wrong. Please try again."
+                      if lang=="english"
+                      else "⚠️ ఏదో తప్పు జరిగింది. మళ్ళీ try చేయండి.")
+            )
+        except Exception: pass
+        return Response("",status=200)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
@@ -935,76 +1437,70 @@ def webhook():
 
 @app.route("/health")
 def health():
-    keys = [
-        "TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_FROM_NUMBER",
-        "SARVAM_API_KEY","CLAUDE_API_KEY","CARBONE_API_KEY",
-        "CARBONE_TAX_VERSION_ID","CARBONE_BOS_VERSION_ID","CARBONE_NONGST_VERSION_ID",
-        "CARBONE_REPORT_VERSION_ID",   # ← new in v11
-        "SUPABASE_URL","SUPABASE_KEY"
-    ]
+    keys = ["TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_FROM_NUMBER",
+            "SARVAM_API_KEY","SUPABASE_URL","SUPABASE_KEY"]
     checks = {k: bool(env(k)) for k in keys}
+    checks["CLAUDE_API_KEY"] = bool(env("CLAUDE_API_KEY") or env("ANTHROPIC_API_KEY"))
     try:
-        r = requests.get(sb_url("sellers","?limit=1"), headers=sb_headers(), timeout=5)
+        r = requests.get(sb_url("sellers","?limit=1"), headers=sb_h(), timeout=5)
         checks["supabase_connection"] = (r.status_code == 200)
-    except:
+    except Exception:
         checks["supabase_connection"] = False
-
-    all_ok = all(checks.values())
-    return {
-        "status":    "healthy" if all_ok else "missing_config",
-        "version":   "v11",
-        "checks":    checks,
-        "timestamp": datetime.now().isoformat()
-    }, 200 if all_ok else 500
-
+    ok = all(checks.values())
+    return {"status":"healthy" if ok else "missing_config",
+            "version":"v16","checks":checks,
+            "timestamp":datetime.now().isoformat()}, 200 if ok else 500
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HOME
+# HOME PAGE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 HOME_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>GutInvoice — Every Invoice has a Voice</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0A0F1E;color:#fff;min-height:100vh}
-nav{display:flex;justify-content:space-between;align-items:center;padding:18px 60px;border-bottom:1px solid rgba(255,107,53,0.12);background:rgba(10,15,30,0.98)}
-.logo{font-size:24px;font-weight:900;color:#FF6B35}.logo span{color:#fff}
-.logo-sub{font-size:11px;color:#475569;margin-top:3px;letter-spacing:1px;text-transform:uppercase}
-.live-pill{display:flex;align-items:center;gap:8px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);padding:8px 18px;border-radius:50px;font-size:12px;color:#10B981;font-weight:700}
-.live-dot{width:7px;height:7px;background:#10B981;border-radius:50%;animation:blink 2s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
-.hero{min-height:90vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:80px 40px}
-.hero h1{font-size:clamp(42px,7vw,82px);font-weight:900;line-height:1.05;letter-spacing:-2.5px;margin-bottom:24px}
-.hero h1 em{color:#FF6B35;font-style:normal}
-.hero-desc{font-size:20px;color:#64748B;max-width:580px;line-height:1.7}
-.btn{background:#FF6B35;color:#fff;padding:15px 36px;border-radius:50px;font-size:15px;font-weight:800;text-decoration:none;margin-top:36px;display:inline-block}
-footer{border-top:1px solid rgba(255,255,255,0.05);padding:40px;text-align:center;color:#374151;font-size:12px}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0A0F1E;color:#fff;
+     min-height:100vh;display:flex;flex-direction:column;align-items:center;
+     justify-content:center;text-align:center;padding:40px 20px}
+h1{font-size:48px;font-weight:900;color:#FF6B35;margin-bottom:8px}
+h2{font-size:18px;color:#94a3b8;margin-bottom:30px}
+.pill{display:inline-flex;align-items:center;gap:8px;background:rgba(16,185,129,.1);
+      border:1px solid rgba(16,185,129,.3);padding:8px 20px;border-radius:50px;
+      font-size:13px;color:#10B981;font-weight:700;margin-bottom:30px}
+.dot{width:8px;height:8px;background:#10B981;border-radius:50%;animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.grid{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;max-width:950px}
+.card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+      border-radius:16px;padding:24px;width:210px}
+.card h3{font-size:28px;margin-bottom:8px}
+.card p{font-size:13px;color:#94a3b8;line-height:1.5}
+footer{margin-top:50px;font-size:12px;color:#475569;line-height:1.8}
 </style>
 </head>
 <body>
-<nav>
-  <div><div class="logo">Gut<span>Invoice</span></div><div class="logo-sub">Every Invoice has a Voice</div></div>
-  <div class="live-pill"><span class="live-dot"></span>LIVE v11</div>
-</nav>
-<section class="hero">
-  <h1>Your Voice.<br/>Your <em>Invoice.</em></h1>
-  <p class="hero-desc">Voice note → GST invoice PDF in 30 seconds.<br/>Type "January 2026 summary" → full monthly tax report.</p>
-  <p style="color:#FBBF24;font-size:16px;margin-top:16px;font-style:italic">మాట్లాడండి — Invoice వస్తుంది. అంతే.</p>
-  <a href="#" class="btn">Start Free — 3 Invoices</a>
-</section>
-<footer>Built for Telugu-speaking MSMEs · Hyderabad, India · © 2026 GutInvoice</footer>
+<div class="pill"><div class="dot"></div>LIVE — v16</div>
+<h1>GutInvoice</h1>
+<h2>Every Invoice has a Voice 🎙️</h2>
+<div class="grid">
+  <div class="card"><h3>🎙️</h3><p>Send a voice note in Telugu or English on WhatsApp</p></div>
+  <div class="card"><h3>🤖</h3><p>AI transcribes speech and extracts all invoice details</p></div>
+  <div class="card"><h3>📄</h3><p>GST-compliant PDF with sequential invoice number in 30 sec</p></div>
+  <div class="card"><h3>❌</h3><p>Say "cancel TEJ001-022026" → credit note auto-generated</p></div>
+</div>
+<footer>
+  Built for Telugu-speaking MSMEs · Hyderabad, India<br>
+  Powered by Tallbag Advisory and Tech Solutions Private Limited · +91 7702424946
+</footer>
 </body></html>"""
 
 @app.route("/")
 def home():
     return render_template_string(HOME_HTML)
 
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    log.info(f"🚀 GutInvoice v11 starting on port {port}")
+    port = int(env("PORT",5000))
+    log.info(f"🚀 GutInvoice v16 starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
