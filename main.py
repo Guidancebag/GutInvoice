@@ -532,7 +532,14 @@ Note: They may speak in Telugu, English, or mixed.
 def fetch_monthly_invoices(seller_phone, month_num, year):
     """
     Fetch all records for a seller in a given month/year from Supabase.
-    Returns (active_invoices, credit_notes) — cancelled invoices are excluded from both.
+    Returns (all_original_invoices, credit_notes).
+
+    IMPORTANT for GST accounting:
+    - all_original_invoices includes BOTH active AND cancelled invoices.
+      Cancelled ones still raised a GST liability when issued — the credit note
+      reverses it. Both must appear in the gross totals for GSTR-1.
+    - credit_notes are separated so Section E and net GST deduction works correctly.
+    - Net GST = gross GST (all originals) - credit note reversals = correct payable.
     """
     from calendar import monthrange
     last_day  = monthrange(year, month_num)[1]
@@ -549,16 +556,18 @@ def fetch_monthly_invoices(seller_phone, month_num, year):
     r = requests.get(sb_url("invoices", query), headers=sb_headers(), timeout=15)
     all_rows = safe_json(r, "SB-FetchMonthly")
 
-    active_invoices = [row for row in all_rows
-                       if row.get("status") != "cancelled"
-                       and row.get("invoice_type","").upper() != "CREDIT NOTE"]
-    credit_notes    = [row for row in all_rows
-                       if row.get("invoice_type","").upper() == "CREDIT NOTE"
-                       and row.get("status") != "cancelled"]
+    # ALL original invoices (active + cancelled) — needed for correct gross GST total
+    all_invoices = [row for row in all_rows
+                    if row.get("invoice_type","").upper() != "CREDIT NOTE"]
 
-    log.info(f"Fetched {len(active_invoices)} invoices + {len(credit_notes)} credit notes "
-             f"for {seller_phone} in {month_num}/{year}")
-    return active_invoices, credit_notes
+    # Credit notes only
+    credit_notes = [row for row in all_rows
+                    if row.get("invoice_type","").upper() == "CREDIT NOTE"]
+
+    log.info(f"Fetched {len(all_invoices)} invoices "
+             f"({sum(1 for r in all_invoices if r.get('status')=='cancelled')} cancelled) "
+             f"+ {len(credit_notes)} credit notes for {seller_phone} in {month_num}/{year}")
+    return all_invoices, credit_notes
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -607,11 +616,17 @@ def aggregate_report_data(invoices, credit_notes, seller, month_num, year):
         return "—"
 
     for inv in invoices:
-        raw = inv.get("invoice_data") or {}
+        raw      = inv.get("invoice_data") or {}
         inv_type = (inv.get("invoice_type") or "").upper()
+        is_cancelled = inv.get("status") == "cancelled"
+
+        # Mark cancelled invoices clearly in the description
+        inv_no   = inv.get("invoice_number", "")
+        if is_cancelled:
+            inv_no = f"{inv_no} (CANCELLED)"
 
         row = {
-            "invoice_number": inv.get("invoice_number", ""),
+            "invoice_number": inv_no,
             "invoice_date":   (inv.get("created_at") or "")[:10],
             "customer_name":  inv.get("customer_name") or "—",
             "description":    get_items_desc(raw),
@@ -622,9 +637,10 @@ def aggregate_report_data(invoices, credit_notes, seller, month_num, year):
             "hsn":            get_hsn(raw),
         }
 
-        # HSN accumulation
+        # HSN accumulation — include ALL invoices (active + cancelled)
+        # because gross GST must include cancelled invoice amounts
         hsn_key = get_hsn(raw) or "MISC"
-        hsn_acc[hsn_key]["description"] = get_items_desc(raw)
+        hsn_acc[hsn_key]["description"]   = get_items_desc(raw)
         hsn_acc[hsn_key]["taxable_value"] += float(inv.get("taxable_value", 0))
         hsn_acc[hsn_key]["cgst"]          += float(inv.get("cgst_amount", 0))
         hsn_acc[hsn_key]["sgst"]          += float(inv.get("sgst_amount", 0))
@@ -690,11 +706,13 @@ def aggregate_report_data(invoices, credit_notes, seller, month_num, year):
             "igst":          fmt(section_total(rows,"igst_amount")),
         }
 
-    # Grand totals
+    # Grand totals — ALL original invoices (active + cancelled) for correct gross GST
+    # Cancelled invoices created a liability when raised; credit notes reverse them.
+    # Both must appear in GSTR-1. Net = gross - reversals.
     all_taxable   = sum(float(inv.get("taxable_value",0)) for inv in invoices)
-    all_cgst      = sum(float(inv.get("cgst_amount",0)) for inv in invoices)
-    all_sgst      = sum(float(inv.get("sgst_amount",0)) for inv in invoices)
-    all_igst      = sum(float(inv.get("igst_amount",0)) for inv in invoices)
+    all_cgst      = sum(float(inv.get("cgst_amount",0))   for inv in invoices)
+    all_sgst      = sum(float(inv.get("sgst_amount",0))   for inv in invoices)
+    all_igst      = sum(float(inv.get("igst_amount",0))   for inv in invoices)
     all_gst       = all_cgst + all_sgst + all_igst
 
     # Credit note reversals
@@ -713,7 +731,7 @@ def aggregate_report_data(invoices, credit_notes, seller, month_num, year):
         "report_month":   MONTH_NAMES[month_num],
         "report_year":    str(year),
         "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "total_count":    len(invoices),
+        "total_count":    sum(1 for inv in invoices if inv.get("status") != "cancelled"),
 
         # Section A — Tax Invoices
         "tax_invoices":       tax_rows,
