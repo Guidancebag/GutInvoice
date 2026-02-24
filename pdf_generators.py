@@ -358,7 +358,7 @@ def build_tax_invoice(d: dict) -> bytes:
 
     # ── Line Items ────────────────────────────────────────────────────────────
     cw = [W*0.05, W*0.30, W*0.10, W*0.07, W*0.08, W*0.18, W*0.22]
-    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]
+    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (Rs.)", "Amount (Rs.)"]
     def row(it):
         return [
             p(it.get("sno",""),         "tbl_c"),
@@ -378,15 +378,15 @@ def build_tax_invoice(d: dict) -> bytes:
     igst_r = d.get("igst_rate",0);  igst_a = fmt(d.get("igst_amount",0))
 
     tax_rows = [
-        [p("Taxable Value", "body"),      p(f"₹ {fmt(d.get('taxable_value',0))}", "body_r")],
+        [p("Taxable Value", "body"),      p(f"Rs. {fmt(d.get('taxable_value',0))}", "body_r")],
     ]
     if float(str(d.get("cgst_amount",0)).replace(",","")) > 0:
-        tax_rows.append([p(f"CGST @ {cgst_r}%","body"), p(f"₹ {cgst_a}","body_r")])
+        tax_rows.append([p(f"CGST @ {cgst_r}%","body"), p(f"Rs. {cgst_a}","body_r")])
     if float(str(d.get("sgst_amount",0)).replace(",","")) > 0:
-        tax_rows.append([p(f"SGST @ {sgst_r}%","body"), p(f"₹ {sgst_a}","body_r")])
+        tax_rows.append([p(f"SGST @ {sgst_r}%","body"), p(f"Rs. {sgst_a}","body_r")])
     if float(str(d.get("igst_amount",0)).replace(",","")) > 0:
-        tax_rows.append([p(f"IGST @ {igst_r}%","body"), p(f"₹ {igst_a}","body_r")])
-    tax_rows.append([p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")])
+        tax_rows.append([p(f"IGST @ {igst_r}%","body"), p(f"Rs. {igst_a}","body_r")])
+    tax_rows.append([p("GRAND TOTAL","grand_l"), p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")])
 
     el.append(totals_table(tax_rows))
     el.append(sp(2))
@@ -463,7 +463,7 @@ def build_bill_of_supply(d: dict) -> bytes:
 
     # ── Line Items (NO tax columns) ───────────────────────────────────────────
     cw = [W*0.05, W*0.33, W*0.11, W*0.08, W*0.09, W*0.17, W*0.17]
-    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]
+    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (Rs.)", "Amount (Rs.)"]
     def row(it):
         return [
             p(it.get("sno",""),         "tbl_c"),
@@ -479,8 +479,8 @@ def build_bill_of_supply(d: dict) -> bytes:
 
     # ── Totals (NO tax rows) ──────────────────────────────────────────────────
     tot_rows = [
-        [p("Sub Total","body"),    p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
-        [p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+        [p("Sub Total","body"),    p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("GRAND TOTAL","grand_l"), p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")],
     ]
     el.append(totals_table(tot_rows))
     el.append(sp(2))
@@ -553,7 +553,7 @@ def build_nongst_invoice(d: dict) -> bytes:
 
     # ── Line Items (has HSN/SAC per template, no tax) ─────────────────────────
     cw = [W*0.05, W*0.33, W*0.11, W*0.08, W*0.09, W*0.17, W*0.17]
-    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]
+    hdrs = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (Rs.)", "Amount (Rs.)"]
     def row(it):
         return [
             p(it.get("sno",""),         "tbl_c"),
@@ -569,8 +569,8 @@ def build_nongst_invoice(d: dict) -> bytes:
 
     # ── Totals ────────────────────────────────────────────────────────────────
     tot_rows = [
-        [p("Sub Total","body"),      p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
-        [p("TOTAL AMOUNT","grand_l"),p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+        [p("Sub Total","body"),      p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("TOTAL AMOUNT","grand_l"),p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")],
     ]
     el.append(totals_table(tot_rows))
     el.append(sp(2))
@@ -627,7 +627,7 @@ def _invoice_section(el, title, rows, totals, bg, show_gst=True):
 
     if show_gst:
         cw   = [W*0.14, W*0.09, W*0.15, W*0.17, W*0.13, W*0.11, W*0.11, W*0.10]
-        hdrs = ["Invoice No","Date","Customer","Description","Taxable ₹","CGST ₹","SGST ₹","IGST ₹"]
+        hdrs = ["Invoice No","Date","Customer","Description","Taxable Rs.","CGST Rs.","SGST Rs.","IGST Rs."]
         def build_row(r):
             return [
                 p(r.get("invoice_number",""), "small"),
@@ -649,7 +649,7 @@ def _invoice_section(el, title, rows, totals, bg, show_gst=True):
         ]
     else:
         cw   = [W*0.18, W*0.10, W*0.20, W*0.27, W*0.25]
-        hdrs = ["Invoice No","Date","Customer","Description","Amount ₹"]
+        hdrs = ["Invoice No","Date","Customer","Description","Amount Rs."]
         def build_row(r):
             return [
                 p(r.get("invoice_number",""), "small"),
@@ -745,8 +745,8 @@ def build_monthly_report(rd: dict) -> bytes:
     summary = rd.get("summary", {})
     smry_data = [[
         p(f"<b>Total Invoices</b><br/><font size='13'><b>{rd.get('total_count',0)}</b></font>", "sum_c"),
-        p(f"<b>Total Taxable Value</b><br/><font size='13'><b>₹ {summary.get('total_taxable_value','0.00')}</b></font>", "sum_c"),
-        p(f"<b>Total GST Payable</b><br/><font size='13'><b>₹ {summary.get('total_gst_payable','0.00')}</b></font>", "sum_c"),
+        p(f"<b>Total Taxable Value</b><br/><font size='13'><b>Rs. {summary.get('total_taxable_value','0.00')}</b></font>", "sum_c"),
+        p(f"<b>Total GST Payable</b><br/><font size='13'><b>Rs. {summary.get('total_gst_payable','0.00')}</b></font>", "sum_c"),
     ]]
     smry_t = Table(smry_data, colWidths=[W/3, W/3, W/3])
     smry_t.setStyle(TableStyle([
@@ -787,7 +787,7 @@ def build_monthly_report(rd: dict) -> bytes:
     hgt      = rd.get("hsn_grand_total",{})
     if hsn_rows:
         cw_h = [W*0.12, W*0.24, W*0.16, W*0.12, W*0.12, W*0.12, W*0.12]
-        hdrs = ["HSN Code","Description","Taxable ₹","CGST ₹","SGST ₹","IGST ₹","Total Tax ₹"]
+        hdrs = ["HSN Code","Description","Taxable Rs.","CGST Rs.","SGST Rs.","IGST Rs.","Total Tax Rs."]
         hsn_data = [[p(h,"tbl_hdr") for h in hdrs]]
         for hr in hsn_rows:
             hsn_data.append([
@@ -830,20 +830,42 @@ def build_monthly_report(rd: dict) -> bytes:
         el.append(p("No HSN data available.", "small"))
     el.append(sp(4))
 
-    # ── Final Tax Liability Box ───────────────────────────────────────────────
+    # ── Section E — Credit Notes ──────────────────────────────────────────────
+    cn_rows = rd.get("credit_notes", [])
+    cn_total = rd.get("credit_notes_total", {})
+    _invoice_section(
+        el, "SECTION E — CREDIT NOTES (Cancelled Invoices)",
+        cn_rows, cn_total,
+        colors.HexColor("#5D3A1A"), show_gst=True
+    )
+
+    # ── Final Tax Liability Box (with credit note adjustment) ─────────────────
     el.append(_section_hdr("FINAL TAX LIABILITY SUMMARY", colors.HexColor("#880000")))
     fin_rows = [
-        [p("Total Taxable Value (all invoices)","body"),
-         p(f"₹ {summary.get('total_taxable_value','0.00')}","body_r")],
-        [p("Total CGST Collected","body"),
-         p(f"₹ {summary.get('total_cgst','0.00')}","body_r")],
-        [p("Total SGST Collected","body"),
-         p(f"₹ {summary.get('total_sgst','0.00')}","body_r")],
-        [p("Total IGST Collected","body"),
-         p(f"₹ {summary.get('total_igst','0.00')}","body_r")],
-        [p("TOTAL GST PAYABLE TO GOVERNMENT ★","grand_l"),
-         p(f"₹ {summary.get('total_gst_payable','0.00')}","grand_r")],
+        [p("Gross Taxable Value (all invoices)","body"),
+         p(f"Rs. {summary.get('total_taxable_value','0.00')}","body_r")],
+        [p("Gross CGST Collected","body"),
+         p(f"Rs. {summary.get('total_cgst','0.00')}","body_r")],
+        [p("Gross SGST Collected","body"),
+         p(f"Rs. {summary.get('total_sgst','0.00')}","body_r")],
+        [p("Gross IGST Collected","body"),
+         p(f"Rs. {summary.get('total_igst','0.00')}","body_r")],
     ]
+    # Show credit note deductions if any exist
+    if cn_rows:
+        fin_rows += [
+            [p("Less: CGST Reversed (Credit Notes)","body"),
+             p(f"(Rs. {cn_total.get('cgst','0.00')})","body_r")],
+            [p("Less: SGST Reversed (Credit Notes)","body"),
+             p(f"(Rs. {cn_total.get('sgst','0.00')})","body_r")],
+            [p("Less: IGST Reversed (Credit Notes)","body"),
+             p(f"(Rs. {cn_total.get('igst','0.00')})","body_r")],
+        ]
+    fin_rows.append([
+        p("NET GST PAYABLE TO GOVERNMENT ★","grand_l"),
+        p(f"Rs. {summary.get('net_gst_payable','0.00')}","grand_r"),
+    ])
+
     fin_t = Table(fin_rows, colWidths=[W*0.7, W*0.3])
     n = len(fin_rows)
     fin_t.setStyle(TableStyle([
@@ -863,6 +885,226 @@ def build_monthly_report(rd: dict) -> bytes:
         "small"
     ))
 
+    el.extend(footer_block())
+    doc.build(el)
+    return buf.getvalue()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CREDIT NOTE BUILDER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_credit_note(d: dict) -> bytes:
+    """
+    Build CREDIT NOTE PDF.
+    Mirrors TAX INVOICE layout but with red accent + reversal wording.
+    Fields: same as tax invoice + credit_note_number, original_invoice_number,
+            original_invoice_date, reason
+    """
+    buf = io.BytesIO()
+    W_  = PAGE_W - 2 * M
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=M, rightMargin=M,
+                            topMargin=M, bottomMargin=M)
+    el  = []
+
+    RED  = colors.HexColor("#880000")
+    RLGT = colors.HexColor("#FFF0F0")
+    RMID = colors.HexColor("#FFCCCC")
+
+    def rp(text, sname="body"):
+        """Paragraph with style — same as outer p()."""
+        st = STYLES[sname] if isinstance(sname, str) else sname
+        return Paragraph(str(text) if text is not None else "", st)
+
+    # ── Header bar (red) ──────────────────────────────────────────────────────
+    hdr_d = [[rp("CREDIT NOTE",
+                  ParagraphStyle("cn_hdr", fontSize=16, textColor=WHITE,
+                                 fontName="Helvetica-Bold", alignment=TA_CENTER))]]
+    hdr_t = Table(hdr_d, colWidths=[W_])
+    hdr_t.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), RED),
+        ("TOPPADDING",    (0,0),(-1,-1), 11),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 11),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+    ]))
+    el.append(hdr_t)
+    el.append(sp(3))
+
+    # ── Reference box (links back to original invoice) ────────────────────────
+    ref_d = [[
+        rp(f"<b>Credit Note No:</b> {d.get('credit_note_number','')}", "body"),
+        rp(f"<b>Credit Note Date:</b> {d.get('credit_note_date','')}", "body"),
+    ],[
+        rp(f"<b>Against Invoice No:</b> {d.get('original_invoice_number','')}", "body"),
+        rp(f"<b>Original Invoice Date:</b> {d.get('original_invoice_date','')}", "body"),
+    ],[
+        rp(f"<b>Reason:</b> {d.get('reason','Cancellation as requested by seller')}", "body"),
+        rp("", "body"),
+    ]]
+    ref_t = Table(ref_d, colWidths=[W_*0.55, W_*0.45])
+    ref_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("INNERGRID",     (0,0),(-1,-1), 0.4, RMID),
+        ("BACKGROUND",    (0,0),(-1,-1), RLGT),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 7),
+        ("SPAN",          (0,2),(0,2)),
+    ]))
+    el.append(ref_t)
+    el.append(sp(2))
+
+    # ── Seller Details | Credit Note Details ──────────────────────────────────
+    sel_d = [
+        [rp("SELLER DETAILS", "lbl"), rp("CREDIT NOTE DETAILS", "lbl")],
+        [rp(f"<b>Business Name:</b> {d.get('seller_name','')}", "body"),
+         rp(f"<b>Credit Note No:</b> {d.get('credit_note_number','')}", "body")],
+        [rp(f"<b>Address:</b> {d.get('seller_address','')}", "body"),
+         rp(f"<b>Date:</b> {d.get('credit_note_date','')}", "body")],
+        [rp(f"<b>GSTIN:</b> {d.get('seller_gstin','N/A')}", "body"),
+         rp(f"<b>Place of Supply:</b> {d.get('place_of_supply','')}", "body")],
+    ]
+    sel_t = Table(sel_d, colWidths=[W_*0.55, W_*0.45])
+    sel_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("INNERGRID",     (0,0),(-1,-1), 0.4, RMID),
+        ("BACKGROUND",    (0,0),(-1,0),  RLGT),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 7),
+        ("TEXTCOLOR",     (0,0),(-1,0),  RED),
+        ("FONTNAME",      (0,0),(-1,0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0),(-1,0),  8),
+    ]))
+    el.append(sel_t)
+    el.append(sp(2))
+
+    # ── Bill To ───────────────────────────────────────────────────────────────
+    bill_d = [
+        [rp("BILL TO (CUSTOMER DETAILS)", "lbl")],
+        [rp(f"<b>Name:</b> {d.get('customer_name','')}", "body")],
+        [rp(f"<b>Address:</b> {d.get('customer_address','')}", "body")],
+        [rp(f"<b>GSTIN:</b> {d.get('customer_gstin','') or 'Unregistered'}", "body")],
+    ]
+    bill_t = Table(bill_d, colWidths=[W_])
+    bill_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("INNERGRID",     (0,0),(-1,-1), 0.4, RMID),
+        ("BACKGROUND",    (0,0),(0,0),   RLGT),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 7),
+        ("TEXTCOLOR",     (0,0),(0,0),   RED),
+        ("FONTNAME",      (0,0),(0,0),   "Helvetica-Bold"),
+        ("FONTSIZE",      (0,0),(0,0),   8),
+    ]))
+    el.append(bill_t)
+    el.append(sp(2))
+
+    # ── Line Items (reversed) ─────────────────────────────────────────────────
+    items = d.get("items", [])
+    cw    = [W_*0.05, W_*0.30, W_*0.10, W_*0.07, W_*0.08, W_*0.18, W_*0.22]
+    hdrs  = ["#", "Description", "HSN/SAC", "Qty", "Unit", "Rate (Rs.)", "Amount (Rs.)"]
+    i_data = [[rp(h, ParagraphStyle(f"ch_{i}", fontSize=8, textColor=WHITE,
+                                     fontName="Helvetica-Bold", alignment=TA_CENTER))
+               for i, h in enumerate(hdrs)]]
+    for it in items:
+        i_data.append([
+            rp(it.get("sno",""),         "tbl_c"),
+            rp(it.get("description",""), "tbl_l"),
+            rp(it.get("hsn_sac",""),     "tbl_c"),
+            rp(fmt(it.get("qty",0)),     "tbl_r"),
+            rp(it.get("unit","Nos"),     "tbl_c"),
+            rp(fmt(it.get("rate",0)),    "tbl_r"),
+            rp(fmt(it.get("amount",0)),  "tbl_r"),
+        ])
+    i_tbl = Table(i_data, colWidths=cw, repeatRows=1)
+    i_tbl.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("INNERGRID",     (0,0),(-1,-1), 0.3, LGREY),
+        ("BACKGROUND",    (0,0),(-1,0),  RED),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, RLGT]),
+        ("TOPPADDING",    (0,0),(-1,-1), 4),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 4),
+        ("LEFTPADDING",   (0,0),(-1,-1), 5),
+        ("VALIGN",        (0,0),(-1,-1), "MIDDLE"),
+        ("FONTSIZE",      (0,1),(-1,-1), 8),
+    ]))
+    el.append(i_tbl)
+    el.append(sp(2))
+
+    # ── Tax Reversal Summary ──────────────────────────────────────────────────
+    cgst_r = d.get("cgst_rate",0);  cgst_a = fmt(d.get("cgst_amount",0))
+    sgst_r = d.get("sgst_rate",0);  sgst_a = fmt(d.get("sgst_amount",0))
+    igst_r = d.get("igst_rate",0);  igst_a = fmt(d.get("igst_amount",0))
+
+    tax_rows_d = [
+        [rp("Taxable Value Reversed","body"),
+         rp(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")],
+    ]
+    if float(str(d.get("cgst_amount",0)).replace(",","")) > 0:
+        tax_rows_d.append([rp(f"CGST @ {cgst_r}% (Reversed)","body"), rp(f"(Rs. {cgst_a})","body_r")])
+    if float(str(d.get("sgst_amount",0)).replace(",","")) > 0:
+        tax_rows_d.append([rp(f"SGST @ {sgst_r}% (Reversed)","body"), rp(f"(Rs. {sgst_a})","body_r")])
+    if float(str(d.get("igst_amount",0)).replace(",","")) > 0:
+        tax_rows_d.append([rp(f"IGST @ {igst_r}% (Reversed)","body"), rp(f"(Rs. {igst_a})","body_r")])
+    tax_rows_d.append([
+        rp("TOTAL CREDIT AMOUNT",
+           ParagraphStyle("cng_l", fontSize=10, textColor=WHITE, fontName="Helvetica-Bold")),
+        rp(f"Rs. {fmt(d.get('total_amount',0))}",
+           ParagraphStyle("cng_r", fontSize=10, textColor=WHITE, fontName="Helvetica-Bold",
+                         alignment=TA_RIGHT)),
+    ])
+    tax_t = Table(tax_rows_d, colWidths=[W_*0.72, W_*0.28])
+    ntr = len(tax_rows_d)
+    tax_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("INNERGRID",     (0,0),(-1,-1), 0.4, LGREY),
+        ("TOPPADDING",    (0,0),(-1,-1), 5),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+        ("BACKGROUND",    (0,ntr-1),(-1,ntr-1), RED),
+    ]))
+    el.append(tax_t)
+    el.append(sp(2))
+    el.append(rp(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
+    el.append(sp(3))
+
+    # ── Declaration ───────────────────────────────────────────────────────────
+    decl_d = [[rp(
+        "<b>DECLARATION</b><br/>"
+        "This Credit Note cancels and fully reverses the above mentioned invoice. "
+        "The tax liability has been reduced accordingly. "
+        "This document is valid for GST credit note purposes under Section 34 of CGST Act 2017.<br/><br/>"
+        f"<b>Original Invoice:</b> {d.get('original_invoice_number','')}  |  "
+        f"<b>Reason:</b> {d.get('reason','Cancellation as requested by seller')}",
+        "body"
+    )]]
+    decl_t = Table(decl_d, colWidths=[W_])
+    decl_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("BACKGROUND",    (0,0),(-1,-1), RLGT),
+        ("TOPPADDING",    (0,0),(-1,-1), 6),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+    ]))
+    el.append(decl_t)
+    el.append(sp(3))
+
+    # ── Signatory ─────────────────────────────────────────────────────────────
+    sig_d = [[rp(
+        f"<b>For {d.get('seller_name','')}</b><br/><br/><br/>Authorised Signatory",
+        "body"
+    )]]
+    sig_t = Table(sig_d, colWidths=[W_])
+    sig_t.setStyle(TableStyle([
+        ("BOX",           (0,0),(-1,-1), 0.8, RMID),
+        ("TOPPADDING",    (0,0),(-1,-1), 6),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8),
+    ]))
+    el.append(sig_t)
     el.extend(footer_block())
 
     doc.build(el)
@@ -886,6 +1128,14 @@ def select_and_generate_pdf(invoice_data: dict, seller_phone: str) -> str:
 
     phone_clean = seller_phone.replace("whatsapp:+","").replace("+","").replace(" ","")
     return upload_pdf_to_supabase(pdf_bytes, f"{phone_clean}/{inv_no}.pdf")
+
+
+def generate_credit_note_pdf(credit_note_data: dict, seller_phone: str) -> str:
+    """Generate Credit Note PDF → upload to Supabase → return public URL."""
+    cn_no       = credit_note_data.get("credit_note_number") or f"CN-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    pdf_bytes   = build_credit_note(credit_note_data)
+    phone_clean = seller_phone.replace("whatsapp:+","").replace("+","").replace(" ","")
+    return upload_pdf_to_supabase(pdf_bytes, f"{phone_clean}/credit_notes/{cn_no}.pdf")
 
 
 def generate_report_pdf_local(report_data: dict, seller_phone: str) -> str:
