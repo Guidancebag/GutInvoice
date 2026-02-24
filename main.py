@@ -1,27 +1,22 @@
 """
 GutInvoice — Every Invoice has a Voice
-v12 — Pure Python PDF Generation (ReportLab replaces Carbone.io)
-  ✅ All v11 features intact (onboarding, Supabase, invoice + report pipeline)
-  ✅ NEW: pdf_generators.py handles all PDF building locally via ReportLab
-  ✅ NEW: PDFs uploaded directly to Supabase Storage bucket "invoices"
-  ✅ REMOVED: All Carbone.io API calls (generate_pdf, generate_report_pdf)
-  ✅ Zero new env vars — uses existing SUPABASE_URL + SUPABASE_KEY
-  ✅ Templates: TAX INVOICE, BILL OF SUPPLY, INVOICE (Non-GST), MONTHLY REPORT
-  ✅ All templates have branded footer: Powered by GutInvoice / Developed by Tejesh
+v13 — Sequential Invoice Numbers + Credit Note System
+  ✅ All v12 features intact (ReportLab PDFs, Supabase storage)
+  ✅ NEW: Sequential invoice numbering — TEJ001-022026 format (per seller per month)
+  ✅ NEW: Cancel invoice via voice/text → Credit Note auto-generated + sent on WhatsApp
+  ✅ NEW: Monthly report includes Section E (Credit Notes) + Net GST Payable
+  ✅ Rs. symbol used throughout (no box rendering issues)
+  ✅ Invoice numbers never reused — cancelled invoices retired permanently
 
-After testing, delete from Railway:
-    CARBONE_API_KEY
-    CARBONE_TAX_VERSION_ID
-    CARBONE_BOS_VERSION_ID
-    CARBONE_NONGST_VERSION_ID
-    CARBONE_REPORT_VERSION_ID
+Invoice number format: {3-letter prefix}{3-digit seq}-{MMYYYY}
+  Example: Tejesh Enterprises, Feb 2026, 1st invoice → TEJ001-022026
+  Next:    TEJ002-022026  |  March:  TEJ001-032026
 
-Trigger phrases (text or voice) — unchanged from v11:
-    "Send January 2026 summary"
-    "January report"
-    "జనవరి 2026 invoices summary"
-    "Last month summary"
-    "February invoices"
+Cancel trigger examples (text or voice):
+  "cancel TEJ001-022026"
+  "cancel invoice TEJ002-022026"
+  "TEJ001-022026 cancel cheyyi"  (Telugu)
+  "001-022026 invoice cancel"
 """
 
 import os
@@ -34,7 +29,7 @@ from twilio.rest import Client as TwilioClient
 from datetime import datetime
 from collections import defaultdict
 import logging
-from pdf_generators import select_and_generate_pdf, generate_report_pdf_local
+from pdf_generators import select_and_generate_pdf, generate_report_pdf_local, generate_credit_note_pdf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -135,12 +130,260 @@ def save_invoice(seller_phone, invoice_data, pdf_url, transcript):
         "invoice_data":     invoice_data,
         "pdf_url":          pdf_url,
         "transcript":       transcript,
-        "status":           "generated"
+        "status":           "active"          # v13: active | cancelled
     }
     r = requests.post(sb_url("invoices"), headers=sb_headers(), json=row, timeout=10)
     rows = safe_json(r, "SB-SaveInvoice")
     log.info(f"Invoice saved: {invoice_data.get('invoice_number')} for {seller_phone}")
     return rows[0] if rows else {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v13 — SEQUENTIAL INVOICE NUMBERING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_next_invoice_number(seller_phone: str, seller_name: str, month: int, year: int) -> str:
+    """
+    Generate next sequential invoice number for this seller in this month/year.
+    Format: TEJ001-022026
+      - TEJ  = first 3 alpha chars of seller name (uppercase)
+      - 001  = 3-digit sequence (counts ALL invoices+credit notes this month, skips cancelled seq)
+      - 022026 = MMYYYY
+    Cancelled invoice numbers are NEVER reused — sequence always increments.
+    """
+    prefix = re.sub(r'[^A-Za-z]', '', seller_name)[:3].upper() or "GUT"
+    suffix = f"{month:02d}{year}"
+
+    # Count ALL invoice records for this seller with this prefix+suffix pattern
+    # (includes active, cancelled — ensures gaps are never refilled)
+    pattern = f"{prefix}%-{suffix}"
+    r = requests.get(
+        sb_url("invoices",
+               f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
+               f"&invoice_number=like.{requests.utils.quote(pattern)}"
+               f"&select=invoice_number"),
+        headers=sb_headers(), timeout=10
+    )
+    existing = []
+    try:
+        existing = safe_json(r, "SB-GetSeq")
+    except Exception as e:
+        log.warning(f"Could not fetch invoice sequence: {e}")
+
+    seq = len(existing) + 1
+    inv_no = f"{prefix}{seq:03d}-{suffix}"
+    log.info(f"Generated invoice number: {inv_no}")
+    return inv_no
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v13 — CANCEL & CREDIT NOTE SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Regex patterns for cancel detection (covers text + voice transcripts)
+CANCEL_PATTERNS = [
+    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{3}-\d{6})',    # cancel TEJ001-022026
+    r'([A-Z]{2,5}\d{3}-\d{6})\s+(?:ని\s+)?cancel',         # TEJ001-022026 cancel / cancel cheyyi
+    r'cancel\s+(?:invoice\s+)?(\d{3}-\d{6})',               # cancel 001-022026 (no prefix)
+    r'(\d{3}-\d{6})\s+cancel',                              # 001-022026 cancel
+]
+
+
+def detect_cancel_request(text: str):
+    """
+    Returns (True, invoice_number_fragment) or (False, None).
+    invoice_number_fragment may be full (TEJ001-022026) or partial (001-022026).
+    """
+    t = text.upper().strip()
+    for pat in CANCEL_PATTERNS:
+        m = re.search(pat, t)
+        if m:
+            return True, m.group(1)
+    return False, None
+
+
+def fetch_invoice_by_number(invoice_number_fragment: str, seller_phone: str) -> dict | None:
+    """
+    Look up an invoice by full or partial invoice number for this seller.
+    Handles both full (TEJ001-022026) and partial (001-022026) lookups.
+    """
+    fragment = invoice_number_fragment.upper()
+
+    # Try exact match first
+    r = requests.get(
+        sb_url("invoices",
+               f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
+               f"&invoice_number=eq.{requests.utils.quote(fragment)}"
+               f"&status=eq.active&limit=1"),
+        headers=sb_headers(), timeout=10
+    )
+    rows = []
+    try:
+        rows = safe_json(r, "SB-FetchInvExact")
+    except:
+        pass
+    if rows:
+        return rows[0]
+
+    # Try ends-with match (partial like 001-022026)
+    r2 = requests.get(
+        sb_url("invoices",
+               f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
+               f"&invoice_number=like.{requests.utils.quote('%' + fragment)}"
+               f"&status=eq.active&limit=1"),
+        headers=sb_headers(), timeout=10
+    )
+    try:
+        rows2 = safe_json(r2, "SB-FetchInvPartial")
+        return rows2[0] if rows2 else None
+    except:
+        return None
+
+
+def cancel_invoice_in_db(invoice_number: str, seller_phone: str) -> bool:
+    """Mark invoice as cancelled in Supabase. Returns True on success."""
+    r = requests.patch(
+        sb_url("invoices",
+               f"?seller_phone=eq.{requests.utils.quote(seller_phone)}"
+               f"&invoice_number=eq.{requests.utils.quote(invoice_number)}"),
+        headers=sb_headers(),
+        json={"status": "cancelled"},
+        timeout=10
+    )
+    log.info(f"Cancel invoice {invoice_number}: HTTP {r.status_code}")
+    return r.status_code in (200, 204)
+
+
+def build_credit_note_data(original_invoice: dict, seller: dict) -> dict:
+    """
+    Build credit note data dict from original invoice DB row.
+    Credit note number = CN- + original invoice number.
+    """
+    inv_data = original_invoice.get("invoice_data") or {}
+    orig_no  = original_invoice.get("invoice_number", "")
+    cn_no    = f"CN-{orig_no}"
+    today    = datetime.now().strftime("%d/%m/%Y")
+
+    return {
+        "credit_note_number":    cn_no,
+        "credit_note_date":      today,
+        "original_invoice_number": orig_no,
+        "original_invoice_date": inv_data.get("invoice_date", ""),
+        "reason":                "Cancellation of invoice as requested by seller",
+        # Seller
+        "seller_name":    inv_data.get("seller_name") or seller.get("seller_name",""),
+        "seller_address": inv_data.get("seller_address") or seller.get("seller_address",""),
+        "seller_gstin":   inv_data.get("seller_gstin") or seller.get("seller_gstin",""),
+        "place_of_supply":inv_data.get("place_of_supply","Telangana"),
+        # Customer
+        "customer_name":    inv_data.get("customer_name",""),
+        "customer_address": inv_data.get("customer_address",""),
+        "customer_gstin":   inv_data.get("customer_gstin",""),
+        # Items (same as original, for reference)
+        "items":            inv_data.get("items",[]),
+        # Financials (reversed)
+        "taxable_value": inv_data.get("taxable_value", original_invoice.get("taxable_value",0)),
+        "cgst_rate":     inv_data.get("cgst_rate",0),
+        "cgst_amount":   inv_data.get("cgst_amount", original_invoice.get("cgst_amount",0)),
+        "sgst_rate":     inv_data.get("sgst_rate",0),
+        "sgst_amount":   inv_data.get("sgst_amount", original_invoice.get("sgst_amount",0)),
+        "igst_rate":     inv_data.get("igst_rate",0),
+        "igst_amount":   inv_data.get("igst_amount", original_invoice.get("igst_amount",0)),
+        "total_amount":  inv_data.get("total_amount", original_invoice.get("total_amount",0)),
+        "invoice_type":  "CREDIT NOTE",
+    }
+
+
+def save_credit_note(seller_phone: str, cn_data: dict, pdf_url: str):
+    """Save credit note to invoices table with invoice_type=CREDIT NOTE."""
+    row = {
+        "seller_phone":   seller_phone,
+        "invoice_number": cn_data.get("credit_note_number",""),
+        "invoice_type":   "CREDIT NOTE",
+        "customer_name":  cn_data.get("customer_name",""),
+        "customer_address":cn_data.get("customer_address",""),
+        "customer_gstin": cn_data.get("customer_gstin",""),
+        "taxable_value":  float(cn_data.get("taxable_value",0)),
+        "cgst_amount":    float(cn_data.get("cgst_amount",0)),
+        "sgst_amount":    float(cn_data.get("sgst_amount",0)),
+        "igst_amount":    float(cn_data.get("igst_amount",0)),
+        "total_amount":   float(cn_data.get("total_amount",0)),
+        "invoice_data":   cn_data,
+        "pdf_url":        pdf_url,
+        "transcript":     f"Credit note for {cn_data.get('original_invoice_number','')}",
+        "status":         "active",
+    }
+    r = requests.post(sb_url("invoices"), headers=sb_headers(), json=row, timeout=10)
+    log.info(f"Credit note saved: {cn_data.get('credit_note_number')} HTTP {r.status_code}")
+
+
+def handle_cancel_request(twilio, from_num, seller, invoice_fragment, lang):
+    """
+    Full cancel pipeline:
+      1. Look up original invoice
+      2. Mark it cancelled in DB
+      3. Build credit note data
+      4. Generate credit note PDF
+      5. Save credit note to DB
+      6. Send credit note to WhatsApp
+    """
+    # Acknowledge
+    send_msg(twilio, from_num,
+        f"🔍 Looking up invoice *{invoice_fragment}*... ⏳"
+        if lang != "telugu" else
+        f"🔍 Invoice *{invoice_fragment}* వెతుకుతున్నాం... ⏳"
+    )
+
+    original = fetch_invoice_by_number(invoice_fragment, from_num)
+
+    if not original:
+        send_msg(twilio, from_num,
+            f"❌ Invoice *{invoice_fragment}* not found or already cancelled.\n"
+            f"Please check the invoice number and try again."
+            if lang != "telugu" else
+            f"❌ Invoice *{invoice_fragment}* కనుగొనబడలేదు లేదా ఇప్పటికే cancel అయింది.\n"
+            f"Invoice number తనిఖీ చేసి మళ్ళీ try చేయండి."
+        )
+        return
+
+    full_inv_no = original.get("invoice_number","")
+
+    # Cancel in DB
+    cancel_invoice_in_db(full_inv_no, from_num)
+
+    # Build + generate credit note
+    cn_data  = build_credit_note_data(original, seller)
+    cn_pdf   = generate_credit_note_pdf(cn_data, from_num)
+    save_credit_note(from_num, cn_data, cn_pdf)
+
+    # Send to WhatsApp
+    cn_no = cn_data.get("credit_note_number","")
+    total = cn_data.get("total_amount",0)
+
+    if lang == "telugu":
+        body = (
+            f"✅ *Invoice Cancel అయింది!*\n\n"
+            f"❌ Cancelled: *{full_inv_no}*\n"
+            f"📋 Credit Note: *{cn_no}*\n"
+            f"💰 Amount Reversed: Rs.{float(total):,.0f}\n\n"
+            f"ఈ credit note మీ GST records లో invoice ని reverse చేస్తుంది.\n"
+            f"_GutInvoice 🎙️ — మీ గొంతే మీ Invoice_"
+        )
+    else:
+        body = (
+            f"✅ *Invoice Cancelled Successfully!*\n\n"
+            f"❌ Cancelled: *{full_inv_no}*\n"
+            f"📋 Credit Note: *{cn_no}*\n"
+            f"💰 Amount Reversed: Rs.{float(total):,.0f}\n\n"
+            f"This credit note reverses the invoice in your GST records.\n"
+            f"_Powered by GutInvoice 🎙️ — Every Invoice has a Voice_"
+        )
+
+    msg = twilio.messages.create(
+        from_=env("TWILIO_FROM_NUMBER"), to=from_num,
+        body=body, media_url=[cn_pdf]
+    )
+    log.info(f"✅ Credit note {cn_no} sent for cancelled invoice {full_inv_no} | msg {msg.sid}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -254,12 +497,11 @@ Note: They may speak in Telugu, English, or mixed.
 
 def fetch_monthly_invoices(seller_phone, month_num, year):
     """
-    Fetch all invoices for a seller in a given month/year from Supabase.
-    Returns list of invoice dicts.
+    Fetch all records for a seller in a given month/year from Supabase.
+    Returns (active_invoices, credit_notes) — cancelled invoices are excluded from both.
     """
-    # Date range for the month
     from calendar import monthrange
-    last_day = monthrange(year, month_num)[1]
+    last_day  = monthrange(year, month_num)[1]
     date_from = f"{year}-{month_num:02d}-01T00:00:00"
     date_to   = f"{year}-{month_num:02d}-{last_day:02d}T23:59:59"
 
@@ -271,9 +513,18 @@ def fetch_monthly_invoices(seller_phone, month_num, year):
         f"&limit=500"
     )
     r = requests.get(sb_url("invoices", query), headers=sb_headers(), timeout=15)
-    invoices = safe_json(r, "SB-FetchMonthly")
-    log.info(f"Fetched {len(invoices)} invoices for {seller_phone} in {month_num}/{year}")
-    return invoices
+    all_rows = safe_json(r, "SB-FetchMonthly")
+
+    active_invoices = [row for row in all_rows
+                       if row.get("status") != "cancelled"
+                       and row.get("invoice_type","").upper() != "CREDIT NOTE"]
+    credit_notes    = [row for row in all_rows
+                       if row.get("invoice_type","").upper() == "CREDIT NOTE"
+                       and row.get("status") != "cancelled"]
+
+    log.info(f"Fetched {len(active_invoices)} invoices + {len(credit_notes)} credit notes "
+             f"for {seller_phone} in {month_num}/{year}")
+    return active_invoices, credit_notes
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -290,10 +541,11 @@ def fmt(val):
     except:
         return "0.00"
 
-def aggregate_report_data(invoices, seller, month_num, year):
+def aggregate_report_data(invoices, credit_notes, seller, month_num, year):
     """
-    Aggregate invoice list into Carbone-ready data dict.
-    Splits into TAX / BOS / NONGST sections + HSN summary.
+    Aggregate invoice list into report data dict.
+    Splits into TAX / BOS / NONGST / CREDIT NOTES + HSN summary.
+    Net GST = Gross GST - GST reversed by credit notes.
     """
     tax_rows   = []
     bos_rows   = []
@@ -379,12 +631,45 @@ def aggregate_report_data(invoices, seller, month_num, year):
             "total_tax":    fmt(total_tax),
         })
 
+    # ── Credit notes section ──────────────────────────────────────────────────
+    def make_cn_row(cn):
+        cn_data = cn.get("invoice_data") or {}
+        return {
+            "invoice_number":  cn.get("invoice_number",""),
+            "invoice_date":    (cn.get("created_at",""))[:10],
+            "customer_name":   cn.get("customer_name","—"),
+            "description":     f"Reversal of {cn_data.get('original_invoice_number','')}",
+            "taxable_value":   fmt(cn.get("taxable_value",0)),
+            "cgst_amount":     fmt(cn.get("cgst_amount",0)),
+            "sgst_amount":     fmt(cn.get("sgst_amount",0)),
+            "igst_amount":     fmt(cn.get("igst_amount",0)),
+        }
+
+    cn_rows = [make_cn_row(cn) for cn in credit_notes]
+
+    def make_cn_total(rows):
+        return {
+            "count": len(rows),
+            "taxable_value": fmt(section_total(rows,"taxable_value")),
+            "cgst":          fmt(section_total(rows,"cgst_amount")),
+            "sgst":          fmt(section_total(rows,"sgst_amount")),
+            "igst":          fmt(section_total(rows,"igst_amount")),
+        }
+
     # Grand totals
-    all_taxable = sum(float(inv.get("taxable_value",0)) for inv in invoices)
-    all_cgst    = sum(float(inv.get("cgst_amount",0)) for inv in invoices)
-    all_sgst    = sum(float(inv.get("sgst_amount",0)) for inv in invoices)
-    all_igst    = sum(float(inv.get("igst_amount",0)) for inv in invoices)
-    all_gst     = all_cgst + all_sgst + all_igst
+    all_taxable   = sum(float(inv.get("taxable_value",0)) for inv in invoices)
+    all_cgst      = sum(float(inv.get("cgst_amount",0)) for inv in invoices)
+    all_sgst      = sum(float(inv.get("sgst_amount",0)) for inv in invoices)
+    all_igst      = sum(float(inv.get("igst_amount",0)) for inv in invoices)
+    all_gst       = all_cgst + all_sgst + all_igst
+
+    # Credit note reversals
+    cn_cgst = sum(float(cn.get("cgst_amount",0)) for cn in credit_notes)
+    cn_sgst = sum(float(cn.get("sgst_amount",0)) for cn in credit_notes)
+    cn_igst = sum(float(cn.get("igst_amount",0)) for cn in credit_notes)
+    cn_gst  = cn_cgst + cn_sgst + cn_igst
+
+    net_gst = all_gst - cn_gst  # Net GST payable after credit note reversals
 
     return {
         # Header
@@ -396,20 +681,20 @@ def aggregate_report_data(invoices, seller, month_num, year):
         "generated_date": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "total_count":    len(invoices),
 
-        # Section 1 — Tax Invoices
-        "tax_invoices":       tax_rows if tax_rows else [{"invoice_number":"No tax invoices","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
+        # Section A — Tax Invoices
+        "tax_invoices":       tax_rows,
         "tax_invoices_total": make_total(tax_rows),
 
-        # Section 2 — Bill of Supply
-        "bos_invoices": bos_rows if bos_rows else [{"invoice_number":"No bill of supply","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
+        # Section B — Bill of Supply
+        "bos_invoices": bos_rows,
         "bos_total":    make_total(bos_rows),
 
-        # Section 3 — Non-GST
-        "nongst_invoices": nongst_rows if nongst_rows else [{"invoice_number":"No non-GST invoices","invoice_date":"","customer_name":"","description":"","taxable_value":"0.00","cgst_amount":"0.00","sgst_amount":"0.00","igst_amount":"0.00","hsn":""}],
+        # Section C — Non-GST
+        "nongst_invoices": nongst_rows,
         "nongst_total":    make_total(nongst_rows),
 
-        # Section 4 — HSN Summary
-        "hsn_summary": hsn_rows if hsn_rows else [{"hsn_code":"—","description":"No data","taxable_value":"0.00","cgst":"0.00","sgst":"0.00","igst":"0.00","total_tax":"0.00"}],
+        # Section D — HSN Summary
+        "hsn_summary": hsn_rows,
         "hsn_grand_total": {
             "taxable_value": fmt(sum(float(str(r["taxable_value"]).replace(",","")) for r in hsn_rows)),
             "cgst":  fmt(sum(float(str(r["cgst"]).replace(",","")) for r in hsn_rows)),
@@ -418,19 +703,27 @@ def aggregate_report_data(invoices, seller, month_num, year):
             "total_tax": fmt(sum(float(str(r["total_tax"]).replace(",","")) for r in hsn_rows)),
         },
 
-        # Section 5 — Summary
+        # Section E — Credit Notes
+        "credit_notes":       cn_rows,
+        "credit_notes_total": make_cn_total(cn_rows),
+
+        # Final Summary (with credit note adjustment)
         "summary": {
             "total_taxable_value": fmt(all_taxable),
             "total_cgst":          fmt(all_cgst),
             "total_sgst":          fmt(all_sgst),
             "total_igst":          fmt(all_igst),
-            "total_gst_payable":   fmt(all_gst),
+            "total_gst_payable":   fmt(all_gst),     # Gross
+            "cn_cgst":             fmt(cn_cgst),
+            "cn_sgst":             fmt(cn_sgst),
+            "cn_igst":             fmt(cn_igst),
+            "net_gst_payable":     fmt(net_gst),     # After credit note reversals ← key field
         },
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MONTHLY REPORT — STEP 4: RENDER PDF VIA CARBONE
+# MONTHLY REPORT — STEP 4: PDF + SEND
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # generate_report_pdf() removed in v12 — replaced by generate_report_pdf_local() from pdf_generators.py
@@ -441,26 +734,34 @@ def aggregate_report_data(invoices, seller, month_num, year):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def send_report_whatsapp(twilio, to, pdf_url, report_data, lang="english"):
-    month = report_data.get("report_month","")
-    year  = report_data.get("report_year","")
-    count = report_data.get("total_count", 0)
-    tv    = report_data.get("summary",{}).get("total_taxable_value","0.00")
-    gst   = report_data.get("summary",{}).get("total_gst_payable","0.00")
+    month  = report_data.get("report_month","")
+    year   = report_data.get("report_year","")
+    count  = report_data.get("total_count", 0)
+    tv     = report_data.get("summary",{}).get("total_taxable_value","0.00")
+    gst    = report_data.get("summary",{}).get("total_gst_payable","0.00")
+    net    = report_data.get("summary",{}).get("net_gst_payable","0.00")
+    cn_cnt = len(report_data.get("credit_notes",[]))
 
     if lang == "telugu":
+        cn_line = f"❌ Credit Notes: {cn_cnt}\n" if cn_cnt else ""
         body = (
             f"📊 *{month} {year} Invoice Report Ready!*\n\n"
             f"📄 Total Invoices: {count}\n"
-            f"💰 Total Taxable Value: ₹{tv}\n"
-            f"🏛️ GST Payable: ₹{gst}\n\n"
+            f"{cn_line}"
+            f"💰 Total Taxable Value: Rs.{tv}\n"
+            f"🏛️ Gross GST: Rs.{gst}\n"
+            f"✅ Net GST Payable: Rs.{net}\n\n"
             f"_GutInvoice 🎙️ — మీ గొంతే మీ Invoice_"
         )
     else:
+        cn_line = f"❌ Credit Notes: {cn_cnt}\n" if cn_cnt else ""
         body = (
             f"📊 *{month} {year} Invoice & Tax Report*\n\n"
             f"📄 Total Invoices: {count}\n"
-            f"💰 Total Taxable Value: ₹{tv}\n"
-            f"🏛️ GST Payable to Govt: ₹{gst}\n\n"
+            f"{cn_line}"
+            f"💰 Total Taxable Value: Rs.{tv}\n"
+            f"🏛️ Gross GST: Rs.{gst}\n"
+            f"✅ Net GST Payable to Govt: Rs.{net}\n\n"
             f"_Powered by GutInvoice 🎙️ — Every Invoice has a Voice_"
         )
 
@@ -488,9 +789,9 @@ def handle_report_request(twilio, from_num, seller, month_num, year, lang):
         f"📊 మీ *{month_name} {year} report* generate అవుతోంది... ⏳\n_(30–60 seconds పట్టవచ్చు)_"
     )
 
-    invoices = fetch_monthly_invoices(from_num, month_num, year)
+    invoices, credit_notes = fetch_monthly_invoices(from_num, month_num, year)
 
-    if not invoices:
+    if not invoices and not credit_notes:
         send_msg(twilio, from_num,
             f"ℹ️ No invoices found for *{month_name} {year}*.\n"
             f"Send a voice note to create invoices first!"
@@ -500,7 +801,7 @@ def handle_report_request(twilio, from_num, seller, month_num, year, lang):
         )
         return
 
-    report_data = aggregate_report_data(invoices, seller, month_num, year)
+    report_data = aggregate_report_data(invoices, credit_notes, seller, month_num, year)
     pdf_url     = generate_report_pdf_local(report_data, from_num)
     send_report_whatsapp(twilio, from_num, pdf_url, report_data, lang)
     log.info(f"✅ Report delivered for {from_num} — {month_name} {year}")
@@ -722,9 +1023,9 @@ def transcribe_audio(audio_bytes, language="english"):
     return transcript
 
 
-def extract_invoice_data(transcript, seller):
+def extract_invoice_data(transcript, seller, inv_no: str):
+    """Extract invoice JSON from transcript via Claude. inv_no is pre-generated sequentially."""
     today  = datetime.now().strftime("%d/%m/%Y")
-    inv_no = f"GUT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     seller_name    = seller.get("seller_name") or "My Business"
     seller_address = seller.get("seller_address") or "Hyderabad, Telangana"
     seller_gstin   = seller.get("seller_gstin") or ""
@@ -834,23 +1135,31 @@ def webhook():
             audio      = download_audio(media_url)
             transcript = transcribe_audio(audio, lang)
 
-            # ── Check if voice is asking for a REPORT ───────────────────────
+            # ── 1. Check if voice is asking to CANCEL an invoice ────────────
+            is_cancel, inv_fragment = detect_cancel_request(transcript)
+            if is_cancel:
+                handle_cancel_request(twilio, from_num, seller, inv_fragment, lang)
+                return Response("OK", status=200)
+
+            # ── 2. Check if voice is asking for a REPORT ────────────────────
             is_report, month_num, year = detect_report_from_voice(transcript)
             if is_report:
                 handle_report_request(twilio, from_num, seller, month_num, year, lang)
                 return Response("OK", status=200)
 
-            # ── Regular invoice pipeline ─────────────────────────────────────
+            # ── 3. Regular invoice pipeline ──────────────────────────────────
             send_msg(twilio, from_num,
                 "Generating your invoice... _(Ready in ~30 seconds)_"
                 if lang != "telugu" else
                 "Invoice generate అవుతోంది... _(30 seconds లో ready)_"
             )
-            invoice = extract_invoice_data(transcript, seller)
-            pdf_url = select_and_generate_pdf(invoice, from_num)
+            now      = datetime.now()
+            inv_no   = get_next_invoice_number(from_num, seller.get("seller_name","GUT"), now.month, now.year)
+            invoice  = extract_invoice_data(transcript, seller, inv_no)
+            pdf_url  = select_and_generate_pdf(invoice, from_num)
             save_invoice(from_num, invoice, pdf_url, transcript)
             send_invoice_whatsapp(twilio, from_num, pdf_url, invoice, lang)
-            log.info(f"✅ Invoice delivered + saved for {from_num}")
+            log.info(f"✅ Invoice {inv_no} delivered + saved for {from_num}")
             return Response("OK", status=200)
 
         # ── NON-AUDIO MEDIA ──────────────────────────────────────────────────
@@ -864,7 +1173,13 @@ def webhook():
 
         # ── TEXT MESSAGE ─────────────────────────────────────────────────────
         if step == "complete" and body_text:
-            # Check if text is a report request BEFORE onboarding handler
+            # 1. Check for cancel request
+            is_cancel, inv_fragment = detect_cancel_request(body_text)
+            if is_cancel:
+                handle_cancel_request(twilio, from_num, seller, inv_fragment, lang)
+                return Response("OK", status=200)
+
+            # 2. Check if text is a report request
             is_report, month_num, year = is_report_request(body_text)
             if is_report:
                 handle_report_request(twilio, from_num, seller, month_num, year, lang)
@@ -905,7 +1220,7 @@ def health():
     all_ok = all(checks.values())
     return {
         "status":    "healthy" if all_ok else "missing_config",
-        "version":   "v12",
+        "version":   "v13",
         "checks":    checks,
         "timestamp": datetime.now().isoformat()
     }, 200 if all_ok else 500
