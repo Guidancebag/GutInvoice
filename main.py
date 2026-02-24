@@ -1,18 +1,22 @@
 """
 GutInvoice — Every Invoice has a Voice
-v11 — Monthly Invoice & Tax Liability Report
-  ✅ All v10 features intact (onboarding, Supabase, invoice pipeline)
-  ✅ NEW: Monthly report triggered by text or voice
-  ✅ NEW: Supabase query fetches all invoices for seller + month
-  ✅ NEW: Python aggregates by type (TAX/BOS/NONGST) and HSN
-  ✅ NEW: Carbone report template renders professional PDF
-  ✅ NEW: PDF sent back to WhatsApp automatically
-  ✅ Telugu + English triggers both supported
+v12 — Pure Python PDF Generation (ReportLab replaces Carbone.io)
+  ✅ All v11 features intact (onboarding, Supabase, invoice + report pipeline)
+  ✅ NEW: pdf_generators.py handles all PDF building locally via ReportLab
+  ✅ NEW: PDFs uploaded directly to Supabase Storage bucket "invoices"
+  ✅ REMOVED: All Carbone.io API calls (generate_pdf, generate_report_pdf)
+  ✅ Zero new env vars — uses existing SUPABASE_URL + SUPABASE_KEY
+  ✅ Templates: TAX INVOICE, BILL OF SUPPLY, INVOICE (Non-GST), MONTHLY REPORT
+  ✅ All templates have branded footer: Powered by GutInvoice / Developed by Tejesh
 
-New ENV var needed in Railway:
-    CARBONE_REPORT_VERSION_ID = <versionId from Carbone after uploading report template>
+After testing, delete from Railway:
+    CARBONE_API_KEY
+    CARBONE_TAX_VERSION_ID
+    CARBONE_BOS_VERSION_ID
+    CARBONE_NONGST_VERSION_ID
+    CARBONE_REPORT_VERSION_ID
 
-Trigger phrases (text or voice):
+Trigger phrases (text or voice) — unchanged from v11:
     "Send January 2026 summary"
     "January report"
     "జనవరి 2026 invoices summary"
@@ -30,6 +34,7 @@ from twilio.rest import Client as TwilioClient
 from datetime import datetime
 from collections import defaultdict
 import logging
+from pdf_generators import select_and_generate_pdf, generate_report_pdf_local
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -428,36 +433,7 @@ def aggregate_report_data(invoices, seller, month_num, year):
 # MONTHLY REPORT — STEP 4: RENDER PDF VIA CARBONE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate_report_pdf(report_data):
-    """Render the monthly report template via Carbone. Same pattern as invoice PDF."""
-    version_id = env("CARBONE_REPORT_VERSION_ID")
-    if not version_id:
-        raise Exception("CARBONE_REPORT_VERSION_ID not set in Railway env vars.")
-
-    log.info(f"Carbone Report versionId: {version_id[:16]}...")
-
-    r = requests.post(
-        f"https://api.carbone.io/render/{version_id}?versioning=true",
-        headers={
-            "Authorization": f"Bearer {env('CARBONE_API_KEY')}",
-            "Content-Type":  "application/json",
-            "carbone-version": "5"
-        },
-        json={"data": report_data, "convertTo": "pdf"},
-        timeout=90
-    )
-
-    if r.status_code != 200:
-        raise Exception(f"Carbone report error {r.status_code}: {r.text[:300]}")
-
-    result = safe_json(r, "Carbone-Report")
-    rid = result.get("data", {}).get("renderId")
-    if not rid:
-        raise Exception(f"Carbone returned no renderId for report: {result}")
-
-    pdf_url = f"https://api.carbone.io/render/{rid}"
-    log.info(f"Report PDF ready: {pdf_url}")
-    return pdf_url
+# generate_report_pdf() removed in v12 — replaced by generate_report_pdf_local() from pdf_generators.py
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -525,7 +501,7 @@ def handle_report_request(twilio, from_num, seller, month_num, year, lang):
         return
 
     report_data = aggregate_report_data(invoices, seller, month_num, year)
-    pdf_url     = generate_report_pdf(report_data)
+    pdf_url     = generate_report_pdf_local(report_data, from_num)
     send_report_whatsapp(twilio, from_num, pdf_url, report_data, lang)
     log.info(f"✅ Report delivered for {from_num} — {month_name} {year}")
 
@@ -795,29 +771,7 @@ Return ONLY this JSON, no extra text:
     return data
 
 
-def generate_pdf(invoice_data):
-    t = invoice_data.get("invoice_type","TAX INVOICE")
-    if "BILL" in t:    version_id = env("CARBONE_BOS_VERSION_ID")
-    elif "TAX" in t:   version_id = env("CARBONE_TAX_VERSION_ID")
-    else:              version_id = env("CARBONE_NONGST_VERSION_ID")
-    if not version_id:
-        raise Exception(f"Missing Carbone versionId for: {t}")
-    log.info(f"Carbone versionId: {version_id[:16]}... for {t}")
-    r = requests.post(
-        f"https://api.carbone.io/render/{version_id}?versioning=true",
-        headers={"Authorization":f"Bearer {env('CARBONE_API_KEY')}",
-                 "Content-Type":"application/json","carbone-version":"5"},
-        json={"data":invoice_data,"convertTo":"pdf"}, timeout=60
-    )
-    if r.status_code != 200:
-        raise Exception(f"Carbone error {r.status_code}: {r.text[:300]}")
-    result = safe_json(r,"Carbone-Render")
-    rid = result.get("data",{}).get("renderId")
-    if not rid:
-        raise Exception(f"Carbone returned no renderId: {result}")
-    pdf_url = f"https://api.carbone.io/render/{rid}"
-    log.info(f"PDF ready: {pdf_url}")
-    return pdf_url
+# generate_pdf() removed in v12 — replaced by select_and_generate_pdf() from pdf_generators.py
 
 
 def send_invoice_whatsapp(twilio, to, pdf_url, invoice_data, lang="english"):
@@ -893,7 +847,7 @@ def webhook():
                 "Invoice generate అవుతోంది... _(30 seconds లో ready)_"
             )
             invoice = extract_invoice_data(transcript, seller)
-            pdf_url = generate_pdf(invoice)
+            pdf_url = select_and_generate_pdf(invoice, from_num)
             save_invoice(from_num, invoice, pdf_url, transcript)
             send_invoice_whatsapp(twilio, from_num, pdf_url, invoice, lang)
             log.info(f"✅ Invoice delivered + saved for {from_num}")
@@ -937,10 +891,9 @@ def webhook():
 def health():
     keys = [
         "TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_FROM_NUMBER",
-        "SARVAM_API_KEY","CLAUDE_API_KEY","CARBONE_API_KEY",
-        "CARBONE_TAX_VERSION_ID","CARBONE_BOS_VERSION_ID","CARBONE_NONGST_VERSION_ID",
-        "CARBONE_REPORT_VERSION_ID",   # ← new in v11
+        "SARVAM_API_KEY","CLAUDE_API_KEY",
         "SUPABASE_URL","SUPABASE_KEY"
+        # v12: CARBONE_* keys no longer needed — PDF generation is local (ReportLab)
     ]
     checks = {k: bool(env(k)) for k in keys}
     try:
@@ -952,7 +905,7 @@ def health():
     all_ok = all(checks.values())
     return {
         "status":    "healthy" if all_ok else "missing_config",
-        "version":   "v11",
+        "version":   "v12",
         "checks":    checks,
         "timestamp": datetime.now().isoformat()
     }, 200 if all_ok else 500
