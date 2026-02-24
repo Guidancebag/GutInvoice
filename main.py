@@ -183,43 +183,32 @@ def get_next_invoice_number(seller_phone: str, seller_name: str, month: int, yea
 # v13 — CANCEL & CREDIT NOTE SYSTEM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Regex patterns for cancel detection (covers text + voice transcripts)
+# Cancel detection patterns — kept STRICT to avoid false positives on normal voice notes.
+# Only match proper invoice number format: PREFIX + 3digits + dash + 6digits (MMYYYY)
+# e.g. GUT006-022026 or TEJ001-022026
+# Loose digit-only patterns (\d{9}) were removed — they matched phone numbers in voice notes.
 CANCEL_PATTERNS = [
-    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{3}-\d{6})',   # cancel GUT006-022026
-    r'([A-Z]{2,5}\d{3}-\d{6})\s+cancel',                  # GUT006-022026 cancel
-    r'cancel\s+(?:invoice\s+)?(\d{3}-\d{6})',              # cancel 001-022026
-    r'(\d{3}-\d{6})\s+cancel',                             # 001-022026 cancel
-    r'cancel\s+(?:invoice\s+)?([A-Z]{2,5}\d{9})',          # cancel GUT006022026 (no dash)
-    r'([A-Z]{2,5}\d{9})\s+cancel',                        # GUT006022026 cancel (no dash before cancel)
-    r'cancel\s+(?:invoice\s+)?(\d{9})',                    # cancel 006022026 (digits only no dash)
-    r'(\d{9})\s+cancel',                                   # 006022026 cancel
-    r'cancel\s+(?:invoice\s+)?(\d{3})\s*[-/\s]\s*(\d{6})',# cancel 001 - 022026 / cancel 001 022026
+    # Full format: cancel GUT006-022026  /  cancel invoice GUT006-022026
+    r'\bcancel\b\s+(?:invoice\s+)?([A-Z]{2,5}\d{3}-\d{6})',
+    # Full format after: GUT006-022026 cancel  /  GUT006-022026 cancel cheyyi
+    r'([A-Z]{2,5}\d{3}-\d{6})\s+\bcancel\b',
+    # Partial (no prefix): cancel 006-022026
+    r'\bcancel\b\s+(?:invoice\s+)?(\d{3}-\d{6})',
+    # Partial after: 006-022026 cancel
+    r'(\d{3}-\d{6})\s+\bcancel\b',
 ]
 
 
 def detect_cancel_request(text: str):
     """
     Returns (True, invoice_number_fragment) or (False, None).
-    Handles: typed text, voice transcripts, Telugu mixed, with/without dash.
+    STRICT matching — requires invoice number format to avoid false positives.
     """
-    # Check original AND lowercase — do NOT uppercase (patterns need mixed case for prefix)
-    for t in [text, text.lower()]:
+    for t in [text, text.strip()]:
         for pat in CANCEL_PATTERNS:
-            m = re.search(pat, t, re.IGNORECASE)   # ← IGNORECASE fixes the core bug
+            m = re.search(pat, t, re.IGNORECASE)
             if m:
-                if m.lastindex == 2:
-                    # Pattern with two groups (seq + suffix split)
-                    fragment = f"{m.group(1)}-{m.group(2)}"
-                else:
-                    fragment = m.group(1)
-                # Normalise: if 9 digits with no dash, insert dash after pos 3
-                fragment = fragment.upper()
-                if re.match(r'^[A-Z]{2,5}\d{9}$', fragment):
-                    # e.g. GUT006022026 → GUT006-022026
-                    fragment = fragment[:-6] + "-" + fragment[-6:]
-                elif re.match(r'^\d{9}$', fragment):
-                    # e.g. 006022026 → 006-022026
-                    fragment = fragment[:3] + "-" + fragment[3:]
+                fragment = m.group(1).upper()
                 log.info(f"Cancel detected — fragment: {fragment}")
                 return True, fragment
     return False, None
