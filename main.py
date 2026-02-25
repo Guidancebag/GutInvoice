@@ -128,29 +128,7 @@ def send_rest(to, body, pdf_url=None):
         return False
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# IMPORTS
-# ═══════════════════════════════════════════════════════════════════════════════
-import os, io, json, logging, re, requests
-from datetime import datetime
-from flask import Flask, request, Response, render_template_string
-from twilio.rest import Client as TwilioClient
-import anthropic
-
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.units import mm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log = logging.getLogger(__name__)
-app = Flask(__name__)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BASIC HELPERS
+# PDF BUILDERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def env(key, default=""):
@@ -1353,58 +1331,125 @@ def handle_report_request(from_num, text, seller, lang):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def handle_onboarding(from_num, body, seller):
-    step = seller.get("onboarding_step","language_asked")
-    lang = seller.get("language","english")
+    """
+    Returns a TwiML reply string directly — no send_rest() needed.
+    This ensures the response ALWAYS reaches the user reliably.
+    """
+    step = seller.get("onboarding_step", "language_asked")
+    lang = seller.get("language", "english")
     tl   = (body or "").strip().lower()
+
     if step == "language_asked":
-        if any(x in tl for x in ["1","english"]):
-            update_seller(from_num,{"language":"english","onboarding_step":"registration_asked"})
-            send_rest(from_num,"Great! You chose English 🇬🇧\n\nWould you like to register your business?\nType *YES* to register  |  *SKIP* to start invoicing directly")
-        elif any(x in tl for x in ["2","telugu","తెలుగు"]):
-            update_seller(from_num,{"language":"telugu","onboarding_step":"registration_asked"})
-            send_rest(from_num,"బాగుంది! తెలుగు ఎంచుకున్నారు 🙏\n\nవ్యాపార వివరాలు నమోదు చేయాలా?\n*YES* type చేయండి  |  *SKIP* నేరుగా invoice చేయండి")
+        if any(x in tl for x in ["1", "english"]):
+            update_seller(from_num, {"language": "english", "onboarding_step": "registration_asked"})
+            return twiml_reply(
+                "Great! You chose English 🇬🇧\n\n"
+                "🎙️ You can now *send a voice note* to create an invoice instantly!\n\n"
+                "Or register your business for better invoices:\n"
+                "*YES* → Register business details\n"
+                "*SKIP* → Start invoicing right away"
+            )
+        elif any(x in tl for x in ["2", "telugu", "తెలుగు"]):
+            update_seller(from_num, {"language": "telugu", "onboarding_step": "registration_asked"})
+            return twiml_reply(
+                "బాగుంది! తెలుగు ఎంచుకున్నారు 🙏\n\n"
+                "🎙️ ఇప్పుడే *voice note పంపి* invoice చేయవచ్చు!\n\n"
+                "లేదా వ్యాపార వివరాలు నమోదు చేయండి:\n"
+                "*YES* → వ్యాపార వివరాలు నమోదు చేయండి\n"
+                "*SKIP* → నేరుగా invoice చేయండి"
+            )
         else:
-            send_rest(from_num,"Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\nChoose language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు")
-        return True
+            return twiml_reply(
+                "Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\n"
+                "Choose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు"
+            )
+
     if step == "registration_asked":
-        if any(x in tl for x in ["yes","అవున"]):
-            update_seller(from_num,{"onboarding_step":"reg_name"})
-            send_rest(from_num,"Enter your *Business Name*:" if lang=="english" else "మీ *వ్యాపార పేరు* enter చేయండి:")
+        if any(x in tl for x in ["yes", "అవున"]):
+            update_seller(from_num, {"onboarding_step": "reg_name"})
+            return twiml_reply(
+                "Enter your *Business Name*:" if lang == "english"
+                else "మీ *వ్యాపార పేరు* enter చేయండి:"
+            )
         else:
-            update_seller(from_num,{"onboarding_step":"complete"})
-            send_rest(from_num,"✅ Setup complete! Send a voice note to create your first invoice. 🎙️"
-                      if lang=="english" else "✅ Setup పూర్తయింది! Voice note పంపి invoice చేయండి. 🎙️")
-        return True
+            update_seller(from_num, {"onboarding_step": "complete"})
+            return twiml_reply(
+                "✅ Setup complete!\n\nSend a *voice note* to create your first invoice. 🎙️\n"
+                "Or type *HELP* for all commands."
+                if lang == "english"
+                else "✅ Setup పూర్తయింది!\n\nVoice note పంపి invoice చేయండి. 🎙️\n"
+                     "Commands కోసం *HELP* type చేయండి."
+            )
+
     if step == "reg_name":
-        update_seller(from_num,{"business_name":body.strip(),"onboarding_step":"reg_address"})
-        send_rest(from_num,"Enter your *Business Address*:" if lang=="english" else "మీ *వ్యాపార చిరునామా* enter చేయండి:")
-        return True
+        name = body.strip()
+        if not name:
+            return twiml_reply(
+                "Please enter your *Business Name*:" if lang == "english"
+                else "మీ *వ్యాపార పేరు* enter చేయండి:"
+            )
+        update_seller(from_num, {"business_name": name, "onboarding_step": "reg_address"})
+        return twiml_reply(
+            f"✅ Business Name saved: {name}\n\nNow enter your *Business Address*:"
+            if lang == "english"
+            else f"✅ వ్యాపార పేరు save అయింది: {name}\n\nఇప్పుడు మీ *వ్యాపార చిరునామా* enter చేయండి:"
+        )
+
     if step == "reg_address":
-        update_seller(from_num,{"address":body.strip(),"onboarding_step":"reg_gstin"})
-        send_rest(from_num,"Enter your *GSTIN* (or *SKIP* if unregistered):" if lang=="english" else "మీ *GSTIN* enter చేయండి (లేకుంటే *SKIP*):")
-        return True
+        addr = body.strip()
+        if not addr:
+            return twiml_reply(
+                "Please enter your *Business Address*:" if lang == "english"
+                else "మీ *వ్యాపార చిరునామా* enter చేయండి:"
+            )
+        update_seller(from_num, {"address": addr, "onboarding_step": "reg_gstin"})
+        return twiml_reply(
+            f"✅ Address saved: {addr}\n\nEnter your *GSTIN* (type *SKIP* if not registered):"
+            if lang == "english"
+            else f"✅ చిరునామా save అయింది: {addr}\n\nమీ *GSTIN* enter చేయండి (లేకుంటే *SKIP* type చేయండి):"
+        )
+
     if step == "reg_gstin":
         gstin = "" if "skip" in tl else body.strip().upper()
-        update_seller(from_num,{"gstin":gstin,"onboarding_step":"complete"})
-        name = seller.get("business_name","")
-        send_rest(from_num,f"✅ *Registration Complete!*\nWelcome, {name}!\n\nSend a voice note to create your first invoice. 🎙️\nType *HELP* for commands."
-                  if lang=="english"
-                  else f"✅ *నమోదు పూర్తయింది!*\n{name} కి స్వాగతం!\n\nVoice note పంపి invoice చేయండి. 🎙️\n*HELP* type చేయండి.")
-        return True
-    return False
+        name  = seller.get("business_name", "")
+        update_seller(from_num, {"gstin": gstin, "onboarding_step": "complete"})
+        return twiml_reply(
+            f"✅ *Registration Complete!*\n\n"
+            f"👤 Business: {name}\n"
+            f"🔑 GSTIN: {gstin or 'Not registered'}\n\n"
+            f"🎙️ Send a *voice note* to create your first invoice!\n"
+            f"Type *HELP* for all commands."
+            if lang == "english"
+            else f"✅ *నమోదు పూర్తయింది!*\n\n"
+                 f"👤 వ్యాపారం: {name}\n"
+                 f"🔑 GSTIN: {gstin or 'నమోదు కాలేదు'}\n\n"
+                 f"🎙️ Voice note పంపి మీ మొదటి invoice చేయండి!\n"
+                 f"Commands కోసం *HELP* type చేయండి."
+        )
+
+    # Fallback — complete onboarding if stuck in unknown step
+    update_seller(from_num, {"onboarding_step": "complete"})
+    return twiml_reply(
+        "✅ Setup complete! Send a *voice note* to create an invoice. 🎙️"
+        if lang == "english"
+        else "✅ Setup పూర్తయింది! Voice note పంపి invoice చేయండి. 🎙️"
+    )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOICE NOTE BACKGROUND PROCESSOR
-# Runs in a daemon thread — TwiML ack returned immediately, no timeout risk
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def process_voice_note(from_num, media_url, seller, lang):
+    """Background thread: download → transcribe → extract → PDF → send via REST"""
     try:
         audio = download_audio(media_url)
         tr    = transcribe_audio(audio, lang)
         if not tr.strip():
-            send_rest(from_num,"⚠️ Could not understand audio. Please speak clearly and try again."
-                      if lang=="english" else "⚠️ Audio అర్థం కాలేదు. Clearly చెప్పి మళ్ళీ try చేయండి.")
+            send_rest(from_num,
+                      "⚠️ Could not understand audio. Please speak clearly and try again."
+                      if lang == "english"
+                      else "⚠️ Audio అర్థం కాలేదు. Clearly చెప్పి మళ్ళీ try చేయండి.")
             return
         if is_cancel_request(tr):
             handle_cancel_request(from_num, tr, seller, lang)
@@ -1412,119 +1457,179 @@ def process_voice_note(from_num, media_url, seller, lang):
         if is_report_request(tr):
             handle_report_request(from_num, tr, seller, lang)
             return
-        send_rest(from_num,"⏳ Generating your invoice... (Ready in ~30 seconds)"
-                  if lang=="english" else "⏳ మీ invoice తయారవుతుంది... (~30 seconds)")
+        send_rest(from_num,
+                  "⏳ Generating your invoice... (Ready in ~30 seconds)"
+                  if lang == "english"
+                  else "⏳ మీ invoice తయారవుతుంది... (~30 seconds)")
         now = datetime.utcnow()
         inv = extract_invoice_data(tr, seller, from_num, now.month, now.year)
         url = select_and_generate_pdf(inv, from_num)
         save_invoice(from_num, inv, url)
-        itype=inv.get("invoice_type","Invoice"); inv_no=inv.get("invoice_number","")
-        cname=inv.get("customer_name",""); total=fmt(inv.get("total_amount",0))
-        body = (f"✅ *Your {itype} is Ready!*\n\n📋 Invoice No: {inv_no}\n👤 Customer: {cname}\n💰 Total: ₹ {total}\n\nPowered by *GutInvoice* 🎙️"
-                if lang=="english"
-                else f"✅ *మీ {itype} Ready!*\n\n📋 Invoice No: {inv_no}\n👤 Customer: {cname}\n💰 Total: ₹ {total}\n\nPowered by *GutInvoice* 🎙️")
-        send_rest(from_num, body, url)
+        itype  = inv.get("invoice_type", "Invoice")
+        inv_no = inv.get("invoice_number", "")
+        cname  = inv.get("customer_name", "")
+        total  = fmt(inv.get("total_amount", 0))
+        msg = (f"✅ *Your {itype} is Ready!*\n\n"
+               f"📋 Invoice No: {inv_no}\n"
+               f"👤 Customer: {cname}\n"
+               f"💰 Total: ₹ {total}\n\n"
+               f"Powered by *GutInvoice* 🎙️"
+               if lang == "english"
+               else f"✅ *మీ {itype} Ready!*\n\n"
+                    f"📋 Invoice No: {inv_no}\n"
+                    f"👤 Customer: {cname}\n"
+                    f"💰 Total: ₹ {total}\n\n"
+                    f"Powered by *GutInvoice* 🎙️")
+        send_rest(from_num, msg, url)
         log.info(f"✅ Invoice done | {inv_no} | {from_num}")
     except Exception as e:
         log.error(f"process_voice_note error: {e}", exc_info=True)
-        send_rest(from_num,"⚠️ Something went wrong. Please try again."
-                  if lang=="english" else "⚠️ Error వచ్చింది. మళ్ళీ try చేయండి.")
+        send_rest(from_num,
+                  "⚠️ Something went wrong processing your voice note. Please try again."
+                  if lang == "english"
+                  else "⚠️ Error వచ్చింది. మళ్ళీ try చేయండి.")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TWILIO WEBHOOK — FIXED VERSION
+# TWILIO WEBHOOK  v16.2 — Fully rewritten flow
 # ═══════════════════════════════════════════════════════════════════════════════
 
-GREETINGS = {"hi","hello","hey","hii","helo","start","హలో","నమస్కారం","namaste","నమస్తే","ola","yo"}
+GREETINGS = {"hi", "hello", "hey", "hii", "helo", "start",
+             "హలో", "నమస్కారం", "namaste", "నమస్తే"}
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    from_num  = request.form.get("From","")
-    body      = request.form.get("Body","") or ""
-    media_url = request.form.get("MediaUrl0","")
-    num_media = int(request.form.get("NumMedia",0))
+    from_num  = request.form.get("From", "")
+    body      = request.form.get("Body", "") or ""
+    media_url = request.form.get("MediaUrl0", "")
+    num_media = int(request.form.get("NumMedia", 0))
     log.info(f"─── Webhook | From:{from_num} | Body:{body[:50]!r} | Media:{num_media}")
+
     try:
         seller = get_seller(from_num)
+        tl     = (body or "").strip().lower()
+
+        # ── STEP 1: Brand new user ─────────────────────────────────────────────
         if not seller:
             seller = create_seller(from_num)
-            return twiml_reply("Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\nChoose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు")
-
-        lang = seller.get("language","english")
-        step = seller.get("onboarding_step","complete")
-
-        if step not in ("complete", None, ""):
-            handle_onboarding(from_num, body, seller)
-            return twiml_empty()
-
-        tl = (body or "").strip().lower()
-
-        # GREETING — restored from working version ✅
-        if tl in GREETINGS:
-            name = seller.get("business_name") or "there"
+            # If they sent a voice note directly, process it immediately
+            if num_media and media_url:
+                t = threading.Thread(
+                    target=process_voice_note,
+                    args=(from_num, media_url, seller or {"language":"telugu"}, "telugu"),
+                    daemon=True
+                )
+                t.start()
+                return twiml_reply(
+                    "🎙️ Voice note received! Processing your invoice...\n"
+                    "⏳ Ready in ~30 seconds.\n\n"
+                    "_(Tip: Type *HI* to set your business name & GSTIN)_"
+                )
             return twiml_reply(
-                f"👋 Hey {name}! Welcome to *GutInvoice* 🎙️\n\n"
-                f"🎙️ *Send a voice note* → Auto-generate invoice\n"
-                f"📊 *\'January 2026 summary\'* → Monthly PDF report\n"
-                f"❌ *\'cancel TEJ001-022026\'* → Cancel + credit note\n"
-                f"✏️ *UPDATE* → Update your business profile\n"
-                f"📋 *HELP* → See profile & all commands\n\n"
-                f"Example: _\"Customer Suresh, 50 rods, 800 each, 18% GST\"_"
-                if lang=="english"
-                else f"👋 నమస్కారం {name}! *GutInvoice* కి స్వాగతం 🎙️\n\n"
-                     f"🎙️ *Voice note పంపండి* → Invoice auto-generate\n"
-                     f"📊 *\'January 2026 summary\'* → Monthly report\n"
-                     f"❌ *\'cancel TEJ001-022026\'* → Invoice cancel + credit note\n"
-                     f"✏️ *UPDATE* → Profile update\n"
-                     f"📋 *HELP* → Profile & commands"
+                "Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\n"
+                "Choose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు"
             )
 
-        # HELP
-        if tl in ("help","హెల్ప్","status"):
-            name = seller.get("business_name") or from_num
+        lang = seller.get("language", "english")
+        step = seller.get("onboarding_step", "complete")
+
+        # ── STEP 2: VOICE NOTE — ALWAYS processes, even during onboarding ─────
+        # This is the core product — never block it
+        if num_media and media_url:
+            t = threading.Thread(
+                target=process_voice_note,
+                args=(from_num, media_url, seller, lang),
+                daemon=True
+            )
+            t.start()
+            return twiml_reply(
+                "🎙️ Voice note received! Processing...\n⏳ Your invoice will arrive in ~30 seconds."
+                if lang == "english"
+                else "🎙️ Voice note అందింది! Process అవుతుంది...\n⏳ Invoice ~30 seconds లో వస్తుంది."
+            )
+
+        # ── STEP 3: "Hi/Hello" — ALWAYS shows language selection first ────────
+        if tl in GREETINGS:
+            # Reset to language selection so user can pick/change language
+            update_seller(from_num, {"onboarding_step": "language_asked"})
+            return twiml_reply(
+                "Welcome to *GutInvoice* 🎙️\n_Every Invoice has a Voice_\n\n"
+                "Choose your language:\n1️⃣ English\n2️⃣ Telugu / తెలుగు"
+            )
+
+        # ── STEP 4: ONBOARDING (text flow) ───────────────────────────────────
+        if step not in ("complete", None, ""):
+            return handle_onboarding(from_num, body, seller)
+
+        # ── STEP 5: MAIN COMMANDS (onboarding complete) ───────────────────────
+
+        # HELP / STATUS
+        if tl in ("help", "హెల్ప్", "status"):
+            name  = seller.get("business_name") or "Not set"
             gstin = seller.get("gstin") or "Not set"
             addr  = seller.get("address") or "Not set"
             return twiml_reply(
                 f"📋 *GutInvoice — Your Profile*\n\n"
                 f"👤 {name}\n📍 {addr}\n🔑 GSTIN: {gstin}\n\n"
-                f"🎙️ *Voice note* → Create invoice\n"
+                f"🎙️ *Voice note* → Create any invoice\n"
                 f"📊 *report feb 2026* → Monthly report\n"
                 f"❌ *cancel TEJ001-022026* → Cancel + credit note\n"
-                f"✏️ *UPDATE* → Update profile"
+                f"✏️ *UPDATE* → Update business profile\n\n"
+                f'_Example voice: "Customer Suresh, 50 rods, 800 each, 18% GST"_'
             )
 
-        # UPDATE
-        if tl in ("update","register"):
-            update_seller(from_num,{"onboarding_step":"reg_name"})
-            return twiml_reply("Enter your *Business Name*:" if lang=="english" else "మీ *వ్యాపార పేరు* enter చేయండి:")
+        # UPDATE / REGISTER
+        if tl in ("update", "register"):
+            update_seller(from_num, {"onboarding_step": "reg_name"})
+            return twiml_reply(
+                "✏️ Let\'s update your business profile!\n\n"
+                "Enter your *Business Name*:"
+                if lang == "english"
+                else "✏️ మీ business profile update చేద్దాం!\n\n"
+                     "మీ *వ్యాపార పేరు* enter చేయండి:"
+            )
 
-        # CANCEL (text)
-        if is_cancel_request(body) and not num_media:
-            t = threading.Thread(target=handle_cancel_request, args=(from_num,body,seller,lang), daemon=True)
+        # CANCEL
+        if is_cancel_request(body):
+            t = threading.Thread(
+                target=handle_cancel_request,
+                args=(from_num, body, seller, lang),
+                daemon=True
+            )
             t.start()
-            return twiml_reply("⏳ Processing cancellation..." if lang=="english" else "⏳ Cancellation process అవుతుంది...")
+            return twiml_reply(
+                "⏳ Processing cancellation request..."
+                if lang == "english"
+                else "⏳ Cancellation process అవుతుంది..."
+            )
 
-        # REPORT (text)
-        if is_report_request(body) and not num_media:
-            t = threading.Thread(target=handle_report_request, args=(from_num,body,seller,lang), daemon=True)
+        # REPORT
+        if is_report_request(body):
+            t = threading.Thread(
+                target=handle_report_request,
+                args=(from_num, body, seller, lang),
+                daemon=True
+            )
             t.start()
-            return twiml_reply("📊 Generating your report... (30-60 seconds)" if lang=="english" else "📊 Report తయారవుతుంది... (30-60 seconds)")
+            return twiml_reply(
+                "📊 Generating your report... (30–60 seconds)"
+                if lang == "english"
+                else "📊 Report తయారవుతుంది... (30-60 seconds)"
+            )
 
-        # VOICE NOTE — thread + immediate TwiML ack ✅
-        if num_media and media_url:
-            t = threading.Thread(target=process_voice_note, args=(from_num,media_url,seller,lang), daemon=True)
-            t.start()
-            return twiml_reply("🎙️ Voice note received! Processing...\n⏳ Your invoice will arrive in ~30 seconds."
-                               if lang=="english"
-                               else "🎙️ Voice note అందింది! Process అవుతుంది...\n⏳ Invoice ~30 seconds లో వస్తుంది.")
-
-        # UNKNOWN
-        return twiml_reply("🎙️ Send a *voice note* to create an invoice.\nType *HI* for the full menu."
-                           if lang=="english" else "🎙️ Invoice కోసం *voice note* పంపండి.\nFull menu కోసం *HI* type చేయండి.")
+        # UNKNOWN TEXT — helpful nudge
+        return twiml_reply(
+            "🎙️ Send a *voice note* to create an invoice instantly!\n\n"
+            "Or type:\n• *HI* — Language & menu\n• *HELP* — Your profile\n• *UPDATE* — Edit business details"
+            if lang == "english"
+            else "🎙️ Invoice కోసం *voice note* పంపండి!\n\n"
+                 "లేదా type చేయండి:\n• *HI* — Language & menu\n• *HELP* — Profile\n• *UPDATE* — Business details"
+        )
 
     except Exception as e:
         log.error(f"Webhook FATAL: {e}", exc_info=True)
-        # TwiML fallback — ALWAYS responds, no credentials needed ✅
-        return twiml_reply("⚠️ Something went wrong. Please try again in a moment.")
+        return twiml_reply("⚠️ Something went wrong. Please try again.")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEALTH CHECK
