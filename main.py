@@ -308,11 +308,11 @@ def bill_to_section(d, show_gstin=True):
 def items_table_7col(items):
     """
     7-column items table matching all 3 docx templates:
-    # | Description | HSN/SAC | Qty | Unit | Rate (₹) | Amount (₹)
+    # | Description | HSN/SAC | Qty | Unit | Rate (Rs.) | Amount (Rs.)
     """
     CW = [PAGE_W * w for w in [0.05, 0.33, 0.12, 0.08, 0.08, 0.16, 0.18]]
     data = [[p("#","th"), p("Description","th"), p("HSN/SAC","th"),
-             p("Qty","th"), p("Unit","th"), p("Rate (₹)","th"), p("Amount (₹)","th")]]
+             p("Qty","th"), p("Unit","th"), p("Rate (Rs.)","th"), p("Amount (Rs.)","th")]]
     for it in items:
         data.append([
             p(str(it.get("sno","1")),          "td_c"),
@@ -320,8 +320,8 @@ def items_table_7col(items):
             p(str(it.get("hsn_sac","")),        "td_c"),
             p(fmt(it.get("qty", 0)),             "td_r"),
             p(str(it.get("unit","Nos")),         "td_c"),
-            p(f"₹ {fmt(it.get('rate',0))}",      "td_r"),
-            p(f"₹ {fmt(it.get('amount',0))}",    "td_r"),
+            p(f"Rs. {fmt(it.get('rate',0))}",      "td_r"),
+            p(f"Rs. {fmt(it.get('amount',0))}",    "td_r"),
         ])
     t = Table(data, colWidths=CW, repeatRows=1)
     t.setStyle(TableStyle([
@@ -469,13 +469,13 @@ def build_tax_invoice(d: dict) -> bytes:
     sr  = float(d.get("sgst_rate", 0))
     ir  = float(d.get("igst_rate", 0))
     inter = str(d.get("is_interstate","false")).lower() == "true"
-    tr = [[p("Taxable Value","body"), p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")]]
+    tr = [[p("Taxable Value","body"), p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")]]
     if inter:
-        tr.append([p(f"IGST @ {fmt_i(ir)}%","body"), p(f"₹ {fmt(d.get('igst',0))}","body_r")])
+        tr.append([p(f"IGST @ {fmt_i(ir)}%","body"), p(f"Rs. {fmt(d.get('igst',0))}","body_r")])
     else:
-        tr.append([p(f"CGST @ {fmt_i(cr)}%","body"), p(f"₹ {fmt(d.get('cgst',0))}","body_r")])
-        tr.append([p(f"SGST @ {fmt_i(sr)}%","body"), p(f"₹ {fmt(d.get('sgst',0))}","body_r")])
-    tr.append([p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")])
+        tr.append([p(f"CGST @ {fmt_i(cr)}%","body"), p(f"Rs. {fmt(d.get('cgst',0))}","body_r")])
+        tr.append([p(f"SGST @ {fmt_i(sr)}%","body"), p(f"Rs. {fmt(d.get('sgst',0))}","body_r")])
+    tr.append([p("GRAND TOTAL","grand_l"), p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")])
     el.append(totals_box(tr))
     el.append(sp(2))
     el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
@@ -508,8 +508,8 @@ def build_bill_of_supply(d: dict) -> bytes:
     el.append(items_table_7col(d.get("items", [])))
     el.append(sp(2))
     tr = [
-        [p("Sub Total","body"),    p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
-        [p("GRAND TOTAL","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+        [p("Sub Total","body"),    p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("GRAND TOTAL","grand_l"), p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")],
     ]
     el.append(totals_box(tr))
     el.append(sp(2))
@@ -544,8 +544,8 @@ def build_nongst_invoice(d: dict) -> bytes:
     el.append(items_table_7col(d.get("items", [])))
     el.append(sp(2))
     tr = [
-        [p("Sub Total","body"),       p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")],
-        [p("TOTAL AMOUNT","grand_l"), p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")],
+        [p("Sub Total","body"),       p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")],
+        [p("TOTAL AMOUNT","grand_l"), p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")],
     ]
     el.append(totals_box(tr))
     el.append(sp(2))
@@ -615,17 +615,17 @@ def build_credit_note(d: dict) -> bytes:
     ir    = float(d.get("igst_rate", 0))
     inter = str(d.get("is_interstate","false")).lower() == "true"
     tr    = [[p("Taxable Value Reversed","body"),
-              p(f"₹ {fmt(d.get('taxable_value',0))}","body_r")]]
+              p(f"Rs. {fmt(d.get('taxable_value',0))}","body_r")]]
     if inter:
         tr.append([p(f"IGST @ {fmt_i(ir)}% (Reversed)","red_b"),
-                   p(f"(₹ {fmt(d.get('igst',0))})","red_r")])
+                   p(f"(Rs. {fmt(d.get('igst',0))})","red_r")])
     else:
         tr.append([p(f"CGST @ {fmt_i(cr)}% (Reversed)","red_b"),
-                   p(f"(₹ {fmt(d.get('cgst',0))})","red_r")])
+                   p(f"(Rs. {fmt(d.get('cgst',0))})","red_r")])
         tr.append([p(f"SGST @ {fmt_i(sr)}% (Reversed)","red_b"),
-                   p(f"(₹ {fmt(d.get('sgst',0))})","red_r")])
+                   p(f"(Rs. {fmt(d.get('sgst',0))})","red_r")])
     tr.append([p("TOTAL CREDIT AMOUNT","grand_l"),
-               p(f"₹ {fmt(d.get('total_amount',0))}","grand_r")])
+               p(f"Rs. {fmt(d.get('total_amount',0))}","grand_r")])
     el.append(totals_box(tr))
     el.append(sp(2))
     el.append(p(f"<b>Amount in Words:</b> {num_words(d.get('total_amount',0))}", "body"))
@@ -945,17 +945,31 @@ def update_seller(phone, updates):
 
 def save_invoice(phone, inv_data, pdf_url):
     d = inv_data
+    # Parse invoice month/year from the invoice's own date field if available
+    _inv_date_str = d.get("invoice_date", "")
+    _inv_month = datetime.utcnow().month
+    _inv_year  = datetime.utcnow().year
+    if _inv_date_str:
+        try:
+            # Format: DD/MM/YYYY
+            _parts = _inv_date_str.split("/")
+            if len(_parts) == 3:
+                _inv_month = int(_parts[1])
+                _inv_year  = int(_parts[2])
+        except Exception:
+            pass  # Use utcnow defaults
+
     core = {
-        "seller_phone": phone,
-        "invoice_type": d.get("invoice_type", "TAX INVOICE"),
+        "seller_phone":  phone,
+        "invoice_type":  d.get("invoice_type", "TAX INVOICE"),
         "invoice_number": d.get("invoice_number", ""),
         "customer_name": d.get("customer_name", ""),
-        "total_amount": d.get("total_amount", 0),
-        "invoice_data": json.dumps(d),
-        "pdf_url": pdf_url,
-        "created_at": datetime.utcnow().isoformat(),
-        "invoice_month": datetime.utcnow().month,
-        "invoice_year": datetime.utcnow().year,
+        "total_amount":  d.get("total_amount", 0),
+        "invoice_data":  json.dumps(d),
+        "pdf_url":       pdf_url,
+        "created_at":    datetime.utcnow().isoformat(),
+        "invoice_month": _inv_month,
+        "invoice_year":  _inv_year,
     }
     extra = {
         "taxable_value": d.get("taxable_value", 0),
@@ -1221,18 +1235,40 @@ def handle_cancel_request(from_num, text, seller, lang):
     cn_no = generate_credit_note_number(from_num, seller, now.month, now.year)
     credit = {
         **orig_data,
-        "invoice_type": "CREDIT NOTE", "invoice_number": cn_no,
-        "credit_note_number": cn_no, "invoice_date": now.strftime("%d/%m/%Y"),
+        # Override with correct values — seller from profile, not orig_data
+        "invoice_type":            "CREDIT NOTE",
+        "invoice_number":          cn_no,
+        "credit_note_number":      cn_no,
+        "invoice_date":            now.strftime("%d/%m/%Y"),
         "original_invoice_number": orig["invoice_number"],
-        "original_invoice_date": orig_data.get("invoice_date",""),
-        "reason": "Cancellation of invoice as requested by seller",
+        "original_invoice_date":   orig_data.get("invoice_date", ""),
+        "reason":                  "Cancellation of invoice as requested by seller",
+        # Seller details: always pull from live seller profile
+        "seller_name":    seller.get("business_name") or seller.get("seller_name") or orig_data.get("seller_name",""),
+        "seller_address": seller.get("address") or seller.get("seller_address") or orig_data.get("seller_address",""),
+        "seller_gstin":   seller.get("gstin") or seller.get("seller_gstin") or orig_data.get("seller_gstin",""),
+        # Buyer details: preserve from original invoice
+        "customer_name":    orig_data.get("customer_name",""),
+        "customer_address": orig_data.get("customer_address",""),
+        "customer_gstin":   orig_data.get("customer_gstin",""),
+        "place_of_supply":  orig_data.get("place_of_supply",""),
+        # Tax rates from original invoice
+        "cgst_rate":    orig_data.get("cgst_rate", 0),
+        "sgst_rate":    orig_data.get("sgst_rate", 0),
+        "igst_rate":    orig_data.get("igst_rate", 0),
+        "cgst":         orig_data.get("cgst", 0),
+        "sgst":         orig_data.get("sgst", 0),
+        "igst":         orig_data.get("igst", 0),
+        "taxable_value": orig_data.get("taxable_value", 0),
+        "total_amount":  orig_data.get("total_amount", 0),
+        "items":         orig_data.get("items", []),
     }
     pdf_url = select_and_generate_pdf(credit, from_num)
     save_invoice(from_num, credit, pdf_url)
     total = fmt(orig_data.get("total_amount",0))
-    body = (f"✅ *Invoice {orig['invoice_number']} Cancelled*\n\n📋 Credit Note: {cn_no}\n💰 Credit Amount: ₹ {total}\n\nCredit Note PDF attached ↓"
+    body = (f"✅ *Invoice {orig['invoice_number']} Cancelled*\n\n📋 Credit Note: {cn_no}\n💰 Credit Amount: Rs. {total}\n\nCredit Note PDF attached ↓"
             if lang=="english"
-            else f"✅ *Invoice {orig['invoice_number']} రద్దు*\n\n📋 Credit Note: {cn_no}\n💰 Amount: ₹ {total}\n\nCredit Note PDF పంపబడింది ↓")
+            else f"✅ *Invoice {orig['invoice_number']} రద్దు*\n\n📋 Credit Note: {cn_no}\n💰 Amount: Rs. {total}\n\nCredit Note PDF పంపబడింది ↓")
     send_rest(from_num, body, pdf_url)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1322,7 +1358,7 @@ def handle_report_request(from_num, text, seller, lang):
                          "reversed_cgst":rc,"reversed_sgst":rs,"reversed_igst":ri,"net_gst":net}
     }
     pdf_url = generate_report_pdf_and_upload(report, from_num)
-    body = (f"📊 *{mname} {year} Report Ready!*\n\n🧾 Total: {len(regular)}\n💰 Taxable: ₹ {fmt(gt)}\n🏷️ Net GST: ₹ {fmt(net)}"
+    body = (f"📊 *{mname} {year} Report Ready!*\n\n🧾 Total: {len(regular)}\n💰 Taxable: Rs. {fmt(gt)}\n🏷️ Net GST: Rs. {fmt(net)}"
             + (f"\n📋 Credit Notes: {len(credit_ns)}" if credit_ns else ""))
     send_rest(from_num, body, pdf_url)
 
@@ -1472,13 +1508,13 @@ def process_voice_note(from_num, media_url, seller, lang):
         msg = (f"✅ *Your {itype} is Ready!*\n\n"
                f"📋 Invoice No: {inv_no}\n"
                f"👤 Customer: {cname}\n"
-               f"💰 Total: ₹ {total}\n\n"
+               f"💰 Total: Rs. {total}\n\n"
                f"Powered by *GutInvoice* 🎙️"
                if lang == "english"
                else f"✅ *మీ {itype} Ready!*\n\n"
                     f"📋 Invoice No: {inv_no}\n"
                     f"👤 Customer: {cname}\n"
-                    f"💰 Total: ₹ {total}\n\n"
+                    f"💰 Total: Rs. {total}\n\n"
                     f"Powered by *GutInvoice* 🎙️")
         send_rest(from_num, msg, url)
         log.info(f"✅ Invoice done | {inv_no} | {from_num}")
