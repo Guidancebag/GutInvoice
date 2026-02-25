@@ -1074,23 +1074,73 @@ def download_audio(media_url):
     r = requests.get(media_url, auth=(env("TWILIO_ACCOUNT_SID"), env("TWILIO_AUTH_TOKEN")), timeout=30)
     if r.status_code != 200:
         raise Exception(f"Audio download failed {r.status_code}")
-    log.info(f"Audio: {len(r.content)} bytes")
+    log.info(f"Audio downloaded: {len(r.content)} bytes | Content-Type: {r.headers.get('Content-Type','unknown')}")
     return r.content
 
+def _call_sarvam(audio_bytes, lang_code, model="saaras:v2.5"):
+    """
+    Single Sarvam API call. Returns transcript string or "" on failure.
+    WhatsApp voice notes come as OGG/OPUS.
+    Models available: saaras:v2.5 (primary), saaras:v3 (fallback)
+    """
+    for mime, fname in [
+        ("audio/ogg;codecs=opus", "audio.ogg"),
+        ("audio/ogg",             "audio.ogg"),
+        ("audio/mpeg",            "audio.mp3"),
+    ]:
+        try:
+            r = requests.post(
+                "https://api.sarvam.ai/speech-to-text",
+                files={"file": (fname, audio_bytes, mime)},
+                data={"model": model,
+                      "language_code": lang_code,
+                      "with_disfluencies": "false"},
+                headers={"api-subscription-key": env("SARVAM_API_KEY")},
+                timeout=60
+            )
+            log.info(f"Sarvam [{model}|{lang_code}|{mime}] → HTTP {r.status_code} | {r.text[:200]}")
+            if r.status_code == 200:
+                result = safe_json(r, f"Sarvam-{lang_code}")
+                tr = (result or {}).get("transcript", "").strip()
+                if tr:
+                    return tr
+        except Exception as e:
+            log.error(f"Sarvam call error [{model}|{lang_code}|{mime}]: {e}")
+    return ""
+
 def transcribe_audio(audio_bytes, language="telugu"):
-    lang_map = {"telugu": "te-IN", "english": "en-IN", "both": "te-IN"}
-    r = requests.post(
-        "https://api.sarvam.ai/speech-to-text",
-        files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
-        data={"model": "saaras:v2.5", "language_code": lang_map.get(language, "te-IN"),
-              "with_disfluencies": "false"},
-        headers={"api-subscription-key": env("SARVAM_API_KEY")},
-        timeout=60
-    )
-    result = safe_json(r, "Sarvam")
-    tr = (result or {}).get("transcript", "")
-    log.info(f"Transcript: {tr}")
-    return tr
+    """
+    Transcribe WhatsApp voice note.
+    Strategy:
+      1. Try saaras:v2.5 with user's preferred language (te-IN or en-IN)
+      2. If empty, try saaras:v2.5 with the other language
+      3. If still empty, try saaras:v3 as upgrade fallback
+    """
+    primary   = "te-IN" if language == "telugu" else "en-IN"
+    secondary = "en-IN" if language == "telugu" else "te-IN"
+
+    # Try primary language with v2.5 (proven working model)
+    tr = _call_sarvam(audio_bytes, primary, "saaras:v2.5")
+    if tr:
+        log.info(f"✅ Transcribed [v2.5|{primary}]: {tr}")
+        return tr
+
+    # Fallback to secondary language with v2.5
+    log.warning(f"v2.5 [{primary}] empty, trying [{secondary}]")
+    tr = _call_sarvam(audio_bytes, secondary, "saaras:v2.5")
+    if tr:
+        log.info(f"✅ Transcribed [v2.5|{secondary}] fallback: {tr}")
+        return tr
+
+    # Last resort: try saaras:v3
+    log.warning("v2.5 both languages empty, trying saaras:v3")
+    tr = _call_sarvam(audio_bytes, primary, "saaras:v3")
+    if tr:
+        log.info(f"✅ Transcribed [v3|{primary}]: {tr}")
+        return tr
+
+    log.error("❌ All Sarvam transcription attempts failed")
+    return ""
 
 def extract_invoice_data(transcript, seller, phone, month, year):
     sname  = seller.get("business_name") or seller.get("seller_name") or ""
@@ -1098,41 +1148,46 @@ def extract_invoice_data(transcript, seller, phone, month, year):
     sgstin = seller.get("gstin") or seller.get("seller_gstin") or ""
     inv_no = generate_invoice_number(phone, seller, month, year)
     today  = datetime.now().strftime("%d/%m/%Y")
+
     system = (
         "You are a GST invoice data extractor for Indian businesses. "
-        "Extract invoice details from the voice transcription and return ONLY valid JSON. "
-        "Rules: amounts as numbers only; dates DD/MM/YYYY; "
-        "invoice_type = \"TAX INVOICE\" (GST), \"BILL OF SUPPLY\" (composition/exempt), "
-        "\"INVOICE\" (no GSTIN); cgst_rate=sgst_rate=gst_rate/2 intrastate; "
-        "igst_rate=full interstate; reverse_charge=\"No\" by default."
+        "The input may be Telugu, English, or a mix of both — handle all cases. "
+        "Return ONLY valid JSON, no explanation, no markdown.\n\n"
+        "INVOICE TYPE RULES:\n"
+        "  - TAX INVOICE: GST mentioned, percentage (18%/12%/5%/28%), customer has GSTIN\n"
+        "  - BILL OF SUPPLY: composition dealer, exempt goods, no GST charged\n"
+        "  - INVOICE: no GST at all, no GSTIN, simple sale\n\n"
+        "CALCULATION RULES:\n"
+        "  - Intra-state: cgst_rate = sgst_rate = gst_rate/2, igst = 0\n"
+        "  - Inter-state: igst_rate = full gst_rate, cgst = sgst = 0\n"
+        "  - amount per item = qty * rate\n"
+        "  - taxable_value = sum of all amounts\n"
+        "  - cgst = taxable_value * cgst_rate/100\n"
+        "  - sgst = taxable_value * sgst_rate/100\n"
+        "  - total_amount = taxable_value + cgst + sgst + igst\n\n"
+        "TELUGU KEYWORDS: customer/కస్టమర్=customer_name, పీస్/కిలో/లీటర్=unit, "
+        "రేటు/ధర=rate, జిఎస్టి/శాతం=gst_rate, మొత్తం=total"
     )
     prompt = (
-        f'Transcription: "{transcript}"\n\n'
-        f'Pre-filled seller:\n'
-        f'  seller_name: {sname}\n  seller_address: {saddr}\n'
-        f'  seller_gstin: {sgstin}\n  invoice_number: {inv_no}\n  invoice_date: {today}\n\n'
-        f'Return ONLY this JSON:\n{{\n'
-        f'  "invoice_type": "TAX INVOICE",\n'
-        f'  "invoice_number": "{inv_no}",\n'
-        f'  "invoice_date": "{today}",\n'
-        f'  "seller_name": "{sname}",\n'
-        f'  "seller_address": "{saddr}",\n'
-        f'  "seller_gstin": "{sgstin}",\n'
-        f'  "reverse_charge": "No",\n'
-        f'  "customer_name": "",\n'
-        f'  "customer_address": "",\n'
-        f'  "customer_gstin": "",\n'
-        f'  "place_of_supply": "",\n'
-        f'  "is_interstate": false,\n'
-        f'  "items": [{{"sno":"1","description":"","hsn_sac":"","qty":1,"unit":"Nos","rate":0,"amount":0}}],\n'
-        f'  "taxable_value": 0,\n'
-        f'  "cgst_rate": 9, "sgst_rate": 9, "igst_rate": 0,\n'
-        f'  "cgst": 0, "sgst": 0, "igst": 0,\n'
-        f'  "total_amount": 0,\n'
-        f'  "declaration": "We declare this invoice shows the actual price of goods/services.",\n'
-        f'  "payment_terms": "Pay within 30 days"\n}}' 
+        f'Voice transcription (Telugu/English/mixed): "{transcript}"\n\n'
+        f'Seller details (do NOT change):\n'
+        f'  seller_name: {sname}\n'
+        f'  seller_address: {saddr}\n'
+        f'  seller_gstin: {sgstin}\n'
+        f'  invoice_number: {inv_no}\n'
+        f'  invoice_date: {today}\n\n'
+        f'Return ONLY this JSON with all fields filled from the transcription:\n'
+        f'{{{{"invoice_type":"TAX INVOICE","invoice_number":"{inv_no}","invoice_date":"{today}",'
+        f'"seller_name":"{sname}","seller_address":"{saddr}","seller_gstin":"{sgstin}",'
+        f'"reverse_charge":"No","customer_name":"","customer_address":"","customer_gstin":"",'
+        f'"place_of_supply":"","is_interstate":false,'
+        f'"items":[{{"sno":"1","description":"","hsn_sac":"","qty":1,"unit":"Nos","rate":0,"amount":0}}],'
+        f'"taxable_value":0,"cgst_rate":9,"sgst_rate":9,"igst_rate":0,'
+        f'"cgst":0,"sgst":0,"igst":0,"total_amount":0,'
+        f'"declaration":"We declare that this invoice shows actual price of goods/services described.",'
+        f'"payment_terms":"Payment due within 30 days of invoice date"}}}}' 
     )
-    msg  = get_claude().messages.create(
+    msg = get_claude().messages.create(
         model="claude-haiku-4-5-20251001", max_tokens=1500,
         system=system, messages=[{"role": "user", "content": prompt}]
     )
@@ -1144,7 +1199,7 @@ def extract_invoice_data(transcript, seller, phone, month, year):
         raise Exception(f"No JSON from Claude: {text[:200]}")
     data = json.loads(text[s:e])
     itype2 = data.get("invoice_type",""); ino2 = data.get("invoice_number",""); cname2 = data.get("customer_name","")
-    log.info(f"Invoice: {itype2} #{ino2} | {cname2}")
+    log.info(f"Invoice: {itype2} #{ino2} | Customer: {cname2} | Total: {data.get('total_amount',0)}")
     return data
 
 # ═══════════════════════════════════════════════════════════════════════════════
