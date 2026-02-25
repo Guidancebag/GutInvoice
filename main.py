@@ -35,6 +35,7 @@ SUPABASE SQL (run once if new columns missing):
 # IMPORTS
 # ═══════════════════════════════════════════════════════════════════════════════
 import os, io, json, logging, re, requests, threading
+from urllib.parse import quote as url_quote
 from datetime import datetime
 from flask import Flask, request, Response, render_template_string
 from twilio.rest import Client as TwilioClient
@@ -930,7 +931,8 @@ def sb_url(table, q=""):
 
 def get_seller(phone):
     try:
-        r = requests.get(sb_url("sellers", f"?phone_number=eq.{phone}&limit=1"),
+        ph = url_quote(phone, safe='')
+        r = requests.get(sb_url("sellers", f"?phone_number=eq.{ph}&limit=1"),
                          headers=sb_h(), timeout=10)
         d = safe_json(r, "get_seller")
         return d[0] if isinstance(d, list) and d else None
@@ -954,7 +956,8 @@ def create_seller(phone):
 
 def update_seller(phone, updates):
     try:
-        r = requests.patch(sb_url("sellers", f"?phone_number=eq.{phone}"),
+        ph = url_quote(phone, safe='')
+        r = requests.patch(sb_url("sellers", f"?phone_number=eq.{ph}"),
                            headers=sb_h(), json=updates, timeout=10)
         log.info(f"update_seller {updates} → {r.status_code}")
         return safe_json(r, "update_seller")
@@ -1001,8 +1004,10 @@ def save_invoice(phone, inv_data, pdf_url):
 
 def cancel_invoice_in_db(phone, invoice_number):
     try:
+        ph  = url_quote(phone, safe='')
+        inv = url_quote(invoice_number, safe='')
         r = requests.patch(
-            sb_url("invoices", f"?seller_phone=eq.{phone}&invoice_number=eq.{invoice_number}"),
+            sb_url("invoices", f"?seller_phone=eq.{ph}&invoice_number=eq.{inv}"),
             headers=sb_h(), json={"is_cancelled": True}, timeout=10)
         return safe_json(r, "cancel_invoice")
     except Exception as e:
@@ -1011,8 +1016,10 @@ def cancel_invoice_in_db(phone, invoice_number):
 
 def get_invoice_by_number(phone, invoice_number):
     try:
+        ph  = url_quote(phone, safe='')
+        inv = url_quote(invoice_number, safe='')
         r = requests.get(
-            sb_url("invoices", f"?seller_phone=eq.{phone}&invoice_number=eq.{invoice_number}&limit=1"),
+            sb_url("invoices", f"?seller_phone=eq.{ph}&invoice_number=eq.{inv}&limit=1"),
             headers=sb_h(), timeout=10)
         d = safe_json(r, "get_invoice")
         return d[0] if isinstance(d, list) and d else None
@@ -1022,8 +1029,9 @@ def get_invoice_by_number(phone, invoice_number):
 
 def get_all_monthly_invoices(phone, month, year):
     try:
+        ph = url_quote(phone, safe='')
         r = requests.get(
-            sb_url("invoices", f"?seller_phone=eq.{phone}&invoice_month=eq.{month}&invoice_year=eq.{year}"),
+            sb_url("invoices", f"?seller_phone=eq.{ph}&invoice_month=eq.{month}&invoice_year=eq.{year}"),
             headers=sb_h(), timeout=15)
         d = safe_json(r, "monthly_invoices")
         return d if isinstance(d, list) else []
@@ -1042,7 +1050,8 @@ def get_invoice_prefix(seller):
 
 def get_next_seq(phone, month, year, is_credit=False):
     type_q = "eq.CREDIT NOTE" if is_credit else "neq.CREDIT NOTE"
-    q = f"?seller_phone=eq.{phone}&invoice_month=eq.{month}&invoice_year=eq.{year}&invoice_type={type_q}&select=id"
+    ph = url_quote(phone, safe='')
+    q  = f"?seller_phone=eq.{ph}&invoice_month=eq.{month}&invoice_year=eq.{year}&invoice_type={type_q}&select=id"
     try:
         r = requests.get(sb_url("invoices", q), headers=sb_h(), timeout=10)
         d = safe_json(r, "seq")
@@ -1499,6 +1508,90 @@ HOME_HTML = """<!DOCTYPE html>
 @app.route("/")
 def home():
     return render_template_string(HOME_HTML)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEBUG ENDPOINT — visit https://your-app.railway.app/debug to diagnose
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/debug")
+def debug():
+    """
+    Visit this URL in browser to see exactly what's configured.
+    Safe — shows only presence of keys, not values.
+    """
+    import sys
+    results = {}
+
+    # 1. Env vars
+    for k in ["TWILIO_ACCOUNT_SID","TWILIO_AUTH_TOKEN","TWILIO_FROM_NUMBER",
+              "SARVAM_API_KEY","SUPABASE_URL","SUPABASE_KEY"]:
+        val = env(k)
+        results[k] = f"SET ({len(val)} chars)" if val else "❌ MISSING"
+    results["CLAUDE_API_KEY"] = f"SET" if (env("CLAUDE_API_KEY") or env("ANTHROPIC_API_KEY")) else "❌ MISSING"
+
+    # 2. Twilio test
+    try:
+        c = get_twilio()
+        acc = c.api.accounts(env("TWILIO_ACCOUNT_SID")).fetch()
+        results["twilio_test"] = f"✅ OK — {acc.friendly_name}"
+    except Exception as e:
+        results["twilio_test"] = f"❌ {e}"
+
+    # 3. Supabase sellers table
+    try:
+        r = requests.get(sb_url("sellers","?limit=3"), headers=sb_h(), timeout=5)
+        results["supabase_sellers"] = f"✅ HTTP {r.status_code} — {r.text[:80]}"
+    except Exception as e:
+        results["supabase_sellers"] = f"❌ {e}"
+
+    # 4. Supabase invoices table
+    try:
+        r = requests.get(sb_url("invoices","?limit=1"), headers=sb_h(), timeout=5)
+        results["supabase_invoices"] = f"✅ HTTP {r.status_code} — {r.text[:80]}"
+    except Exception as e:
+        results["supabase_invoices"] = f"❌ {e}"
+
+    # 5. Sarvam API reachability
+    try:
+        r = requests.get("https://api.sarvam.ai", timeout=5)
+        results["sarvam_reachable"] = f"✅ HTTP {r.status_code}"
+    except Exception as e:
+        results["sarvam_reachable"] = f"❌ {e}"
+
+    # 6. TWILIO_FROM_NUMBER format
+    fnum = env("TWILIO_FROM_NUMBER","")
+    if fnum.startswith("whatsapp:"):
+        results["from_number_format"] = f"✅ Correct format: {fnum}"
+    elif fnum:
+        results["from_number_format"] = f"⚠️ Missing 'whatsapp:' prefix — got: {fnum}"
+    else:
+        results["from_number_format"] = "❌ MISSING"
+
+    results["python_version"] = sys.version
+    results["app_version"]    = "v16.1"
+
+    # Return as plain text for easy reading
+    lines = [f"GutInvoice v16.1 — Debug Report",
+             f"Time: {datetime.now().isoformat()}", ""]
+    for k, v in results.items():
+        lines.append(f"  {k}: {v}")
+    return "\n".join(lines), 200, {"Content-Type": "text/plain"}
+
+@app.route("/test-whatsapp")
+def test_whatsapp():
+    """Send a test message to yourself — visit this URL to verify Twilio is working"""
+    test_to = request.args.get("to","")
+    if not test_to:
+        return "Add ?to=whatsapp:+91XXXXXXXXXX to the URL", 400
+    try:
+        get_twilio().messages.create(
+            from_=env("TWILIO_FROM_NUMBER"),
+            to=test_to,
+            body="✅ GutInvoice v16.1 is live and working! Your webhook is connected correctly."
+        )
+        return f"✅ Test message sent to {test_to}", 200
+    except Exception as e:
+        return f"❌ Failed: {e}", 500
 
 if __name__ == "__main__":
     port = int(env("PORT",5000))
